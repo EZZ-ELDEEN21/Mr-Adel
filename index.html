@@ -877,6 +877,14 @@
     });
   }
 
+  function toWhatsappFormat(egyptianPhone) {
+    // بيحول رقم مصري زي 01012345678 لصيغة دولية 201012345678 مطلوبة لروابط واتساب
+    const digits = String(egyptianPhone || '').replace(/\D/g, '');
+    if (digits.startsWith('20')) return digits;
+    if (digits.startsWith('0')) return '2' + digits;
+    return '20' + digits;
+  }
+
   function renderAdminBookingsList() {
     const box = document.getElementById('adminBookingsList');
     if (db.bookings.length === 0) { box.innerHTML = '<div class="empty-msg">لا توجد حجوزات بعد</div>'; return; }
@@ -887,6 +895,14 @@
       const doc = db.doctors.find(function (d) { return d.id === b.doctorId; });
       const slot = db.slots.find(function (s) { return s.id === b.slotId; });
       const pillClass = b.status === 'مؤكد' ? 'pill-confirmed' : b.status === 'ملغي' ? 'pill-cancelled' : b.status === 'تم الحضور' ? 'pill-attended' : 'pill-pending';
+
+      const patientMsg = 'مرحباً ' + b.patientName + '،' +
+        '\nتم تأكيد حجزك في عيادة النور.' +
+        '\nالطبيب: ' + (doc ? doc.name : '') +
+        '\nالموعد: يوم ' + (slot ? slot.day + ' الساعة ' + slot.start : '') +
+        '\nكود الحجز: ' + b.code;
+      const patientWaLink = 'https://wa.me/' + toWhatsappFormat(b.patientPhone) + '?text=' + encodeURIComponent(patientMsg);
+
       return '<div class="admin-list-item" style="flex-direction:column;align-items:flex-start;gap:6px;">' +
         '<div style="display:flex;justify-content:space-between;width:100%;">' +
           '<strong>' + escapeHtml(b.patientName) + '</strong>' +
@@ -899,6 +915,7 @@
           '<button data-status="مؤكد" data-booking="' + b.id + '">تأكيد</button>' +
           '<button data-status="تم الحضور" data-booking="' + b.id + '">تم الحضور</button>' +
           '<button data-status="ملغي" data-booking="' + b.id + '">إلغاء</button>' +
+          '<a href="' + patientWaLink + '" target="_blank" style="font-size:11px;padding:4px 9px;border-radius:3px;border:1px solid #25D366;color:#128C4A;text-decoration:none;display:inline-block;margin-inline-start:4px;">📱 راسل المريض</a>' +
         '</div>' +
       '</div>';
     }).join('');
