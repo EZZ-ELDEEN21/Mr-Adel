@@ -265,38 +265,117 @@
 
 </div>
 
-<script>
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-app.js";
+  import {
+    getFirestore, doc, getDoc, setDoc, runTransaction
+  } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-firestore.js";
+
   /* ============================================================
-     تخزين البيانات: كله بيتحفظ جوه الموقع نفسه (shared storage)
-     مفيش أي اتصال بجوجل شيت أو أي خدمة خارجية
+     الاتصال بقاعدة بيانات Firebase الحقيقية بتاعة العيادة
+     كل البيانات (أطباء / مواعيد / حجوزات) بتتخزن هنا فعلياً،
+     وأي حد يفتح رابط الموقع (من أي جهاز) هيشوف نفس البيانات
      ============================================================ */
+  const firebaseConfig = {
+    apiKey: "AIzaSyClXTtircqJeKJkRTM7pBU5yexiAIld-98",
+    authDomain: "clinic-nour.firebaseapp.com",
+    projectId: "clinic-nour",
+    storageBucket: "clinic-nour.firebasestorage.app",
+    messagingSenderId: "43948752633",
+    appId: "1:43948752633:web:ec7d3148df78e8700bec28"
+  };
 
-  const DB_KEY = 'clinic-nour-db-v1';
+  const app = initializeApp(firebaseConfig);
+  const firestoreDb = getFirestore(app);
+  const DOC_REF = doc(firestoreDb, "clinic", "main");
 
-  let db = { doctors: [], slots: [], bookings: [] };
-  const doctorState = {}; // حالة الواجهة: مفتوح/مقفول، إلخ
+  let db = { doctors: [], slots: [], bookings: [], clinicWhatsapp: '' };
+  const doctorState = {};
+
+  function showSaveStatus(ok, detail) {
+    let el = document.getElementById('saveStatusBanner');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'saveStatusBanner';
+      el.style.cssText = 'position:fixed;bottom:14px;left:50%;transform:translateX(-50%);z-index:999;padding:9px 18px;border-radius:20px;font-family:Segoe UI,Tahoma,Arial,sans-serif;font-size:12.5px;font-weight:700;box-shadow:0 4px 14px rgba(0,0,0,.15);transition:opacity .3s;';
+      document.body.appendChild(el);
+    }
+    el.style.opacity = '1';
+    if (ok) {
+      el.style.background = '#dff3e6';
+      el.style.color = '#1f8a5f';
+      el.textContent = '✓ تم الحفظ';
+      clearTimeout(window._saveStatusTimer);
+      window._saveStatusTimer = setTimeout(function () {
+        if (el) el.style.opacity = '0';
+      }, 3000);
+    } else {
+      showErrorPanel(detail);
+    }
+  }
+
+  // لوحة خطأ كبيرة وواضحة على الشاشة نفسها، بتفضل ظاهرة لحد ما تقفلها،
+  // وفيها زرار نسخ عشان تقدر تبعت النص بالظبط من غير ما تحتاج تفتح Console خالص
+  function showErrorPanel(fullDetail) {
+    let panel = document.getElementById('errorPanel');
+    if (panel) panel.remove();
+
+    panel = document.createElement('div');
+    panel.id = 'errorPanel';
+    panel.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px;font-family:Segoe UI,Tahoma,Arial,sans-serif;';
+    panel.innerHTML =
+      '<div style="background:#fff;border-radius:8px;max-width:480px;width:100%;padding:20px;max-height:80vh;overflow-y:auto;">' +
+        '<div style="font-weight:800;color:#c0392b;font-size:16px;margin-bottom:10px;">✗ حصل خطأ أثناء الحفظ</div>' +
+        '<div style="background:#fbeae8;color:#7a2018;font-size:12.5px;padding:10px;border-radius:6px;white-space:pre-wrap;word-break:break-word;margin-bottom:12px;font-family:monospace;" id="errorPanelText">' +
+          escapeHtml(fullDetail || 'خطأ غير معروف') +
+        '</div>' +
+        '<button id="copyErrorBtn" style="width:100%;padding:10px;border-radius:6px;border:1px solid #ccc;background:#f5f5f5;font-size:13px;cursor:pointer;margin-bottom:8px;">📋 نسخ نص الخطأ</button>' +
+        '<button id="closeErrorBtn" style="width:100%;padding:10px;border-radius:6px;border:none;background:#0f6f66;color:#fff;font-size:13px;cursor:pointer;">إغلاق</button>' +
+      '</div>';
+    document.body.appendChild(panel);
+
+    document.getElementById('closeErrorBtn').addEventListener('click', function () {
+      panel.remove();
+    });
+    document.getElementById('copyErrorBtn').addEventListener('click', function () {
+      const text = document.getElementById('errorPanelText').textContent;
+      navigator.clipboard.writeText(text).then(function () {
+        document.getElementById('copyErrorBtn').textContent = '✓ تم النسخ';
+      }).catch(function () {
+        alert(text);
+      });
+    });
+  }
 
   async function loadDB() {
     try {
-      const result = await window.storage.get(DB_KEY, true);
-      if (result && result.value) {
-        db = JSON.parse(result.value);
-        db.doctors = db.doctors || [];
-        db.slots = db.slots || [];
-        db.bookings = db.bookings || [];
+      const snap = await getDoc(DOC_REF);
+      if (snap.exists()) {
+        const data = snap.data();
+        db = {
+          doctors: data.doctors || [],
+          slots: data.slots || [],
+          bookings: data.bookings || [],
+          clinicWhatsapp: data.clinicWhatsapp || ''
+        };
+      } else {
+        db = { doctors: [], slots: [], bookings: [], clinicWhatsapp: '' };
       }
     } catch (e) {
-      // مفيش بيانات محفوظة لسه - ده طبيعي أول مرة
-      db = { doctors: [], slots: [], bookings: [] };
+      const fullDetail = 'تعذر تحميل البيانات\nالنوع: ' + (e.code || 'غير معروف') + '\nالرسالة: ' + e.message + '\n\n' + (e.stack || '');
+      showErrorPanel(fullDetail);
+      db = db && db.doctors ? db : { doctors: [], slots: [], bookings: [], clinicWhatsapp: '' };
     }
   }
 
   async function saveDB() {
     try {
-      await window.storage.set(DB_KEY, JSON.stringify(db), true);
+      await setDoc(DOC_REF, db);
+      showSaveStatus(true);
       return true;
     } catch (e) {
-      alert('حصل خطأ أثناء الحفظ: ' + e.message);
+      const fullDetail = 'تعذر حفظ البيانات\nالنوع: ' + (e.code || 'غير معروف') + '\nالرسالة: ' + e.message + '\n\n' + (e.stack || '');
+      showSaveStatus(false, fullDetail);
       return false;
     }
   }
@@ -500,51 +579,92 @@
     btn.disabled = true;
     btn.textContent = 'جاري تأكيد الحجز...';
 
-    // إعادة تحميل أحدث نسخة من البيانات فوراً قبل الحجز، عشان نمنع تعارض حجزين في نفس اللحظة
-    await loadDB();
-    const stillAvailable = getAvailableSlots(doctorId).some(function (s) { return s.id === slot.id; });
+    let code = '';
+    try {
+      // Firestore Transaction: العملية دي كلها بتتم دفعة واحدة ذرية (atomic).
+      // لو حصل حجزين لنفس الموعد في نفس اللحظة بالظبط، Firestore بتضمن
+      // إن واحد بس هينجح، والتاني هيلاقي الموعد بقى محجوز ويترفض برسالة واضحة.
+      // ده حماية حقيقية على مستوى قاعدة البيانات، مش مجرد فحص عادي.
+      const result = await runTransaction(firestoreDb, async (tx) => {
+        const snap = await tx.get(DOC_REF);
+        const data = snap.exists() ? snap.data() : { doctors: [], slots: [], bookings: [], clinicWhatsapp: '' };
+        const bookings = data.bookings || [];
 
-    if (!stillAvailable) {
+        const isTaken = bookings.some(function (b) {
+          return b.slotId === slot.id && (b.status === 'معلق' || b.status === 'مؤكد');
+        });
+        if (isTaken) {
+          return { conflict: true };
+        }
+
+        const newCode = bookingCode();
+        const newBooking = {
+          id: newId('bk'),
+          doctorId: doctorId,
+          slotId: slot.id,
+          patientName: name,
+          patientPhone: phone,
+          code: newCode,
+          status: 'معلق',
+          createdAt: Date.now()
+        };
+
+        tx.set(DOC_REF, {
+          doctors: data.doctors || [],
+          slots: data.slots || [],
+          clinicWhatsapp: data.clinicWhatsapp || '',
+          bookings: bookings.concat([newBooking])
+        });
+
+        return { conflict: false, code: newCode };
+      });
+
       btn.disabled = false;
       btn.textContent = 'تأكيد الحجز';
-      errorBox.textContent = 'عذراً، تم حجز هذا الموعد للتو من مستخدم آخر. الرجاء اختيار موعد آخر.';
+
+      if (result.conflict) {
+        errorBox.textContent = 'عذراً، تم حجز هذا الموعد للتو من مستخدم آخر. الرجاء اختيار موعد آخر.';
+        errorBox.style.display = 'block';
+        await loadDB();
+        renderSlotsPanel(doctorId);
+        return;
+      }
+
+      code = result.code;
+      await loadDB(); // تحديث النسخة المحلية عشان لوحة التحكم والصفحة يبقوا متزامنين
+    } catch (e) {
+      btn.disabled = false;
+      btn.textContent = 'تأكيد الحجز';
+      const fullDetail = 'تعذر إتمام الحجز\nالنوع: ' + (e.code || 'غير معروف') + '\nالرسالة: ' + e.message;
+      errorBox.textContent = fullDetail;
+      errorBox.style.whiteSpace = 'pre-wrap';
       errorBox.style.display = 'block';
-      renderSlotsPanel(doctorId);
       return;
     }
-
-    const code = bookingCode();
-    db.bookings.push({
-      id: newId('bk'),
-      doctorId: doctorId,
-      slotId: slot.id,
-      patientName: name,
-      patientPhone: phone,
-      code: code,
-      status: 'معلق',
-      createdAt: Date.now()
-    });
-
-    const saved = await saveDB();
-    btn.disabled = false;
-    btn.textContent = 'تأكيد الحجز';
-
-    if (!saved) return;
 
     showSuccess(doctorId, doctor, slot, code, name);
   }
 
+
   function showSuccess(doctorId, doctor, slot, code, patientName) {
     const panel = document.getElementById('doctor-panel-' + doctorId);
-    const clinicWhatsapp = db.clinicWhatsapp || '201000000000';
+    const clinicWhatsapp = (db.clinicWhatsapp || '').trim();
 
     const msg = 'مرحباً، أريد تأكيد حجز موعد.' +
-      '\\nكود الحجز: ' + code +
-      '\\nاسم المريض: ' + patientName +
-      '\\nالطبيب: ' + (doctor ? doctor.name : '') +
-      '\\nالموعد: يوم ' + slot.day + ' من ' + slot.start + ' إلى ' + slot.end;
+      '\nكود الحجز: ' + code +
+      '\nاسم المريض: ' + patientName +
+      '\nالطبيب: ' + (doctor ? doctor.name : '') +
+      '\nالموعد: يوم ' + slot.day + ' من ' + slot.start + ' إلى ' + slot.end;
 
-    const waLink = 'https://wa.me/' + clinicWhatsapp + '?text=' + encodeURIComponent(msg);
+    const hasWhatsapp = clinicWhatsapp.length >= 10;
+    const waLink = hasWhatsapp
+      ? ('https://wa.me/' + clinicWhatsapp + '?text=' + encodeURIComponent(msg))
+      : '';
+
+    const whatsappSection = hasWhatsapp
+      ? '<a href="' + waLink + '" target="_blank" class="whatsapp-btn">📱 إرسال بيانات الحجز عبر واتساب</a>'
+      : '<div style="background:#fdf2d8;color:#8a6d00;font-size:12.5px;padding:10px 14px;border-radius:4px;margin-top:10px;">'
+        + 'العيادة لسه محطتش رقم واتساب في لوحة التحكم، احتفظ بكود الحجز وكلم العيادة مباشرة.</div>';
 
     panel.innerHTML =
       '<div class="success-box">' +
@@ -552,7 +672,7 @@
         '<div style="font-weight:700;font-size:16px;margin-bottom:4px;">تم استلام حجزك بنجاح</div>' +
         '<div style="color:var(--muted);font-size:12.5px;">احتفظ بكود الحجز، وسيتم تأكيد الموعد نهائياً من العيادة</div>' +
         '<div class="booking-code-box"><div class="label">كود الحجز الخاص بك</div><div class="code">' + escapeHtml(code) + '</div></div>' +
-        '<a href="' + waLink + '" target="_blank" class="whatsapp-btn">📱 إرسال بيانات الحجز عبر واتساب</a>' +
+        whatsappSection +
       '</div>';
   }
 
@@ -579,14 +699,29 @@
 
   function renderAdminPanel() {
     const panel = document.getElementById('adminPanel');
+    const storageNotice = '<div style="background:#e2e8fb;color:#3049a8;padding:10px 14px;border-radius:4px;font-size:12.5px;margin-bottom:16px;">📌 البيانات محفوظة على Firebase الحقيقية، وهتظهر لأي حد يفتح رابط الموقع من أي جهاز أو متصفح.</div>';
+
     panel.innerHTML =
+      storageNotice +
+      '<h2>نسخة احتياطية</h2>' +
+      '<div class="admin-card">' +
+        '<div class="admin-row">' +
+          '<button class="primary-btn" style="width:auto;padding:9px 18px;" id="exportBtn">⬇ تنزيل نسخة احتياطية</button>' +
+          '<button class="secondary-btn" style="width:auto;padding:9px 18px;margin-top:0;" id="importBtnTrigger">⬆ استيراد نسخة</button>' +
+          '<input type="file" id="importFileInput" accept="application/json" class="hidden">' +
+        '</div>' +
+        '<div style="font-size:11.5px;color:var(--muted);">ينصح بتنزيل نسخة احتياطية بعد أي إضافة مهمة، خصوصاً لو الموقع مفتوح بره Claude.</div>' +
+      '</div>' +
+
       '<h2>رقم واتساب العيادة</h2>' +
       '<div class="admin-card">' +
         '<div class="admin-row">' +
           '<input type="text" id="waNumberInput" placeholder="201012345678" value="' + escapeHtml(db.clinicWhatsapp || '') + '">' +
           '<button class="primary-btn" style="width:auto;padding:9px 18px;" id="saveWaBtn">حفظ</button>' +
         '</div>' +
-        '<div style="font-size:11.5px;color:var(--muted);">بصيغة دولية بدون + ، مثال لرقم 01012345678 يكتب 201012345678</div>' +
+        '<div style="font-size:11.5px;color:var(--muted);">بصيغة دولية بدون + ، مثال لرقم 01012345678 يكتب 201012345678' +
+          (db.clinicWhatsapp ? '' : ' — <strong style="color:var(--danger);">لسه متحطش رقم، زرار الواتساب مش هيشتغل صح للمريض من غيره.</strong>') +
+        '</div>' +
       '</div>' +
 
       '<h2>إضافة طبيب جديد</h2>' +
@@ -625,6 +760,46 @@
 
       '<h2>الحجوزات</h2>' +
       '<div class="admin-card" id="adminBookingsList"></div>';
+
+    document.getElementById('exportBtn').addEventListener('click', function () {
+      const blob = new Blob([JSON.stringify(db, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'نسخة-احتياطية-العيادة-' + new Date().toISOString().slice(0, 10) + '.json';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    });
+
+    document.getElementById('importBtnTrigger').addEventListener('click', function () {
+      document.getElementById('importFileInput').click();
+    });
+
+    document.getElementById('importFileInput').addEventListener('change', function (e) {
+      const file = e.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = async function (evt) {
+        try {
+          const imported = JSON.parse(evt.target.result);
+          if (!imported || !Array.isArray(imported.doctors)) throw new Error('ملف غير صالح');
+          if (!confirm('هيتم استبدال كل البيانات الحالية بالنسخة المستوردة. متأكد؟')) return;
+          db = {
+            doctors: imported.doctors || [],
+            slots: imported.slots || [],
+            bookings: imported.bookings || [],
+            clinicWhatsapp: imported.clinicWhatsapp || ''
+          };
+          await saveDB();
+          renderAdminPanel();
+        } catch (err) {
+          alert('تعذر قراءة الملف: ' + err.message);
+        }
+      };
+      reader.readAsText(file);
+    });
 
     document.getElementById('saveWaBtn').addEventListener('click', async function () {
       db.clinicWhatsapp = document.getElementById('waNumberInput').value.trim();
