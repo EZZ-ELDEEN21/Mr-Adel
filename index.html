@@ -68,6 +68,8 @@
     <button class="tab" data-tab="lessons">📚 الشروحات</button>
     <button class="tab" data-tab="quizzes">📝 الامتحانات</button>
     <button class="tab" data-tab="forum">💬 المنتدى</button>
+    <button class="tab" data-tab="leaderboard">🏆 لوحة الشرف</button>
+    <button class="tab" data-tab="ai">🤖 المساعد الذكي</button>
     <button class="tab" data-tab="profile">👤 ملفي</button>
   </nav>
 
@@ -83,6 +85,8 @@
         <div class="streak" id="streakBox"></div>
       </div>
 
+      <div id="pointsBar" class="points-bar"></div>
+
       <h3 class="section-title">نظرة سريعة</h3>
       <div id="studentStats" class="stats-grid"></div>
 
@@ -91,6 +95,9 @@
 
       <h3 class="section-title">آخر منشورات المنتدى</h3>
       <div id="homeForum" class="forum-compact"></div>
+
+      <h3 class="section-title">🏆 لوحة الشرف</h3>
+      <div id="homeLeaderboard" class="table-wrap"></div>
     </div>
 
     <!-- الشروحات -->
@@ -136,6 +143,32 @@
       </div>
       <div id="forumList"></div>
       <div id="threadView" class="hidden"></div>
+    </div>
+    <!-- لوحة الشرف -->
+    <div id="tab-leaderboard" class="tab-panel hidden">
+      <div class="panel-head">
+        <h3 class="section-title">🏆 لوحة الشرف</h3>
+        <p class="muted">اجمع النقط من الحلول الصحيحة والحضور والمشاركة في المنتدى — وتقدر تستبدلها بمكافآت من مستر عادل!</p>
+      </div>
+      <div id="leaderboardPodium" class="podium"></div>
+      <div id="leaderboardTable" class="table-wrap"></div>
+      <h3 class="section-title">🎁 مكتبة المكافآت</h3>
+      <div id="rewardsList" class="cards-grid"></div>
+    </div>
+    <!-- المساعد الذكي -->
+    <div id="tab-ai" class="tab-panel hidden">
+      <div class="panel-head forum-head">
+        <h3 class="section-title">🤖 المساعد الذكي</h3>
+        <span id="aiStatus" class="chip gray">تحميل...</span>
+      </div>
+      <div id="aiChatCard" class="card ai-chat-card">
+        <div id="aiMessages" class="ai-messages"></div>
+        <div class="ai-suggestions" id="aiSuggestions"></div>
+        <div class="ai-input-row">
+          <input type="text" id="aiInput" placeholder="اسأل أي سؤال في الإنجليزي — قواعد، مفردات، ترجمة...">
+          <button id="aiSendBtn" class="btn primary">إرسال</button>
+        </div>
+      </div>
     </div>
     <!-- ملفي -->
     <div id="tab-profile" class="tab-panel hidden">

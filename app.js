@@ -4,7 +4,7 @@
    ============================================================ */
 import { initializeApp } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-app.js";
 import {
-  getFirestore, doc, getDoc, setDoc
+  getFirestore, collection, doc, getDoc, getDocs, setDoc, deleteDoc, onSnapshot
 } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-firestore.js";
 
 /* ---------- الاتصال بقاعدة البيانات ---------- */
@@ -17,12 +17,25 @@ const firebaseConfig = {
   appId: "1:43948752633:web:ec7d3148df78e8700bec28"
 };
 
-let cloudAvailable = true;
-let app, firestoreDb, DOC_REF;
+let cloudAvailable = true;   // SDK اشتغل
+let cloudBlocked = false;    // قواعد Firestore مش منشورة (permission denied)
+let bootSyncDone = false;    // خلصت المزامنة الأولى
+const hydratedCols = new Set(); // المجموعات اللي اتحمّلت من السحابة (تشترط قبل أي كتابة)
+let app, firestoreDb;
+// ==== البنية الجديدة: مجموعة لكل كيان (تزامن صحيح بين الأجهزة بدون last-write-wins) ====
+const ENTITY_SORTS = {
+  students: null, attendance: "date", quizzes: "date", submissions: "submittedAt",
+  lessons: "date", forum: "createdAt", points: "at", rewards: null, redemptions: "at"
+};
+const ENTITIES = Object.keys(ENTITY_SORTS);
+const colRef = (name) => collection(firestoreDb, "adel_" + name);
+const itemRef = (name, id) => doc(firestoreDb, "adel_" + name, String(id));
+const SETTINGS_REF = () => doc(firestoreDb, "adel_settings", "main");
+const LEGACY_REF = () => doc(firestoreDb, "academy", "adelEzzat");
+const BACKUP_REF = () => doc(firestoreDb, "academy", "adelEzzat_backup_v1");
 try {
   app = initializeApp(firebaseConfig);
   firestoreDb = getFirestore(app);
-  DOC_REF = doc(firestoreDb, "academy", "adelEzzat");
 } catch (e) {
   cloudAvailable = false;
 }
@@ -45,7 +58,14 @@ const DEFAULT_DB = {
     }
   ],
   forum: [],
-  settings: { teacherPass: "adel2026", whatsapp: "", banner: "" }
+  points: [],
+  rewards: [
+    { id: "rw_1", name: "+5 درجات في كويز", cost: 80, emoji: "✏️" },
+    { id: "rw_2", name: "سماح من الواجب مرة واحدة", cost: 120, emoji: "🤝" },
+    { id: "rw_3", name: "اختيار لعبة للحصة", cost: 200, emoji: "🎮" }
+  ],
+  redemptions: [],
+  settings: { teacherPass: "adel2026", whatsapp: "", banner: "", aiKey: "", aiModel: "gemini-2.5-flash" }
 };
 
 let db = JSON.parse(JSON.stringify(DEFAULT_DB));
@@ -55,6 +75,7 @@ let currentTab = "home";
 let currentQuiz = null; // {quiz, answers}
 let currentThread = null;
 let cloudErrorShown = false;
+let rulesDeniedToastShown = false;
 
 /* ---------- أدوات ---------- */
 const $ = (id) => document.getElementById(id);
@@ -76,19 +97,73 @@ const dateTime = (ts) => {
   catch { return ""; }
 };
 
-function localSave() {
-  try { localStorage.setItem("adel_db", JSON.stringify(db)); } catch {}
+/* ---------- أدوات التخزين: مجموعة Firestore لكل كيان + تطبيع البيانات ---------- */
+function normalizeSettings(s) {
+  return Object.assign({}, DEFAULT_DB.settings, s || {});
 }
-function localLoad() {
-  try {
-    const raw = localStorage.getItem("adel_db");
-    if (!raw) return false;
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object") return false;
-    db = Object.assign(JSON.parse(JSON.stringify(DEFAULT_DB)), parsed);
-    db.settings = Object.assign({}, DEFAULT_DB.settings, parsed.settings || {});
-    return true;
-  } catch { return false; }
+function normalizeList(name, arr) {
+  if (!Array.isArray(arr)) return [];
+  const seen = new Set();
+  const out = [];
+  for (const it of arr) {
+    if (!it || typeof it !== "object") continue;
+    const key = String(it.id || (name === "students" ? it.code : ""));
+    if (key && seen.has(key)) continue;
+    if (key) seen.add(key);
+    out.push(it);
+  }
+  const sortKey = ENTITY_SORTS[name];
+  if (sortKey) out.sort((a, b) => (a[sortKey] || 0) - (b[sortKey] || 0));
+  return out;
+}
+function applyLists(lists) {
+  for (const name of ENTITIES) {
+    if (Array.isArray(lists[name])) db[name] = normalizeList(name, lists[name]);
+  }
+  // البيانات جاية من السحابة = محفوظة بالفعل
+  for (const name of ENTITIES) markAllSaved(name);
+}
+
+async function readCollection(name) {
+  const snap = await getDocs(colRef(name));
+  const rows = [];
+  snap.forEach((d) => { const v = d.data(); if (v && typeof v === "object") rows.push(v); });
+  return rows;
+}
+
+async function cloudWriteSettings() {
+  await setDoc(SETTINGS_REF(), db.settings);
+  savedSnapshot.set("@settings", JSON.stringify(db.settings));
+}
+// تجاهل كتابة العناصر اللي اتغيرتش — توفير كبير في عمليات الكتابة
+const savedSnapshot = new Map();
+function markAllSaved(name) {
+  for (const item of db[name]) {
+    const id = String(item.id || item.code || "");
+    if (id) savedSnapshot.set(name + "/" + id, JSON.stringify(item));
+  }
+}
+async function cloudWriteList(name) {
+  const ref = colRef(name);
+  for (const item of db[name]) {
+    const id = String(item.id || item.code || uid(name.slice(0, 2)));
+    const json = JSON.stringify(item);
+    const k = name + "/" + id;
+    if (savedSnapshot.get(k) === json) continue; // متغيرش → متكتبش
+    await setDoc(doc(ref, id), item);
+    savedSnapshot.set(k, json);
+  }
+}
+async function cloudWriteAll() {
+  for (const name of ENTITIES) {
+    await cloudWriteList(name);
+    hydratedCols.add(name);
+  }
+  await cloudWriteSettings();
+}
+
+async function cloudDelete(name, id) {
+  try { await deleteDoc(itemRef(name, String(id))); } catch (e) { showSave(false, String((e && e.message) || e)); }
 }
 
 function showSave(ok, detail) {
@@ -97,47 +172,135 @@ function showSave(ok, detail) {
     cloudErrorShown = true;
     toast("⚠ وضع بدون إنترنت: البيانات محفوظة محلياً على الجهاز ده بس.");
   }
+  if (cloudBlocked && !rulesDeniedToastShown) {
+    rulesDeniedToastShown = true;
+    toast("⚠ قواعد قاعدة البيانات مش منشورة — اتبع خطوات README لنشرها عشان المزامنة تشتغل.");
+  }
 }
 function toast(msg) {
+  document.querySelectorAll(".toast").forEach((t) => t.remove());
   const el = document.createElement("div");
-  el.className = "toast-msg";
+  el.className = "toast";
   el.textContent = msg;
-  el.style.cssText = "position:fixed;bottom:16px;left:50%;transform:translateX(-50%);z-index:999;background:#0f2f47;color:#f3e3c2;padding:10px 20px;border-radius:24px;font-size:13px;font-weight:700;box-shadow:0 6px 20px rgba(0,0,0,.25);transition:opacity .3s;";
   document.body.appendChild(el);
   setTimeout(() => { el.style.opacity = "0"; setTimeout(() => el.remove(), 400); }, 3500);
 }
 
+async function migrateLegacyDoc() {
+  // نقل بيانات النسخة القديمة (المستند الواحد academy/adelEzzat) للمجموعات الجديدة — مرة واحدة
+  let legacy = null;
+  try { const s = await getDoc(LEGACY_REF()); if (s.exists()) legacy = s.data(); } catch (e) { return false; }
+  if (!legacy || legacy.migrated) return false;
+  let touched = false;
+  for (const name of ENTITIES) {
+    const arr = legacy[name];
+    if (Array.isArray(arr) && arr.length && db[name].length === 0) {
+      db[name] = normalizeList(name, arr);
+      touched = true;
+    }
+  }
+  if (legacy.settings && typeof legacy.settings === "object") {
+    db.settings = normalizeSettings(Object.assign({}, legacy.settings));
+    touched = true;
+  }
+  if (touched) await cloudWriteAll();
+  // أرشفة النسخة القديمة بدل حذفها (أمان)
+  try { await setDoc(BACKUP_REF(), legacy); await setDoc(LEGACY_REF(), { migrated: true, migratedAt: Date.now() }); } catch (e) {}
+  return true;
+}
+
 async function loadDB() {
-  let loaded = localLoad();
+  // السحابة هي مصدر الحقيقة دايماً — localStorage للعرض الفوري فقط ولا يُقرأ كبيانات
   if (cloudAvailable) {
     try {
-      const snap = await getDoc(DOC_REF);
-      if (snap.exists()) {
-        const data = snap.data();
-        db = Object.assign(JSON.parse(JSON.stringify(DEFAULT_DB)), data);
-        db.settings = Object.assign({}, DEFAULT_DB.settings, data.settings || {});
-        loaded = true;
+      const lists = {};
+      for (const name of ENTITIES) lists[name] = await readCollection(name);
+      let s = null;
+      try { const snap = await getDoc(SETTINGS_REF()); if (snap.exists()) s = snap.data(); } catch (e) {}
+      const cloudHasData = ENTITIES.some((n) => lists[n].length > 0) || !!s;
+      if (!cloudHasData) {
+        const migrated = await migrateLegacyDoc();
+        if (!migrated) await cloudWriteAll();
+      } else {
+        applyLists(lists);
+        if (s) db.settings = normalizeSettings(s);
+        ENTITIES.forEach((n) => hydratedCols.add(n));
       }
     } catch (e) {
-      cloudAvailable = false;
+      const msg = String((e && e.message) || e);
+      if (/permission|denied|insufficient/i.test(msg)) {
+        cloudBlocked = true;
+      } else {
+        cloudAvailable = false;
+      }
       if (!cloudErrorShown) {
         cloudErrorShown = true;
-        toast("⚠ تعذر الاتصال بقاعدة البيانات — هيشتغل وضع محلي مؤقت.");
+        toast(cloudBlocked
+          ? "⚠ قواعد قاعدة البيانات مش منشورة — المزامنة مش هتشتغل لحد ما تُنشر (خطوات README)."
+          : "⚠ تعذر الاتصال بقاعدة البيانات — هيشتغل وضع محلي مؤقت.");
       }
     }
   }
-  if (!loaded) localSave();
+  bootSyncDone = true;
 }
-async function saveDB() {
-  localSave();
-  if (!cloudAvailable) { showSave(false); return false; }
-  try {
-    await setDoc(DOC_REF, db);
-    return true;
-  } catch (e) {
-    showSave(false, e && e.message);
-    return false;
+
+async function saveDB(lists) {
+  // كتابة ذرية لكل عنصر في مجموعته — مفيش كتابة شاملة ومفيش إمكانية إن جهاز يكتب فوق جهاز تاني
+  const targets = Array.isArray(lists) && lists.length ? lists.slice() : ENTITIES.slice();
+  if (cloudAvailable && !cloudBlocked) {
+    try {
+      if (targets.includes("settings")) {
+        targets.splice(targets.indexOf("settings"), 1);
+        await cloudWriteSettings();
+      }
+      for (const name of targets) {
+        if (!ENTITIES.includes(name)) continue;
+        await cloudWriteList(name);
+        hydratedCols.add(name);
+      }
+    } catch (e) {
+      const msg = String((e && e.message) || e);
+      if (/permission|denied|insufficient/i.test(msg)) cloudBlocked = true;
+      showSave(false, msg);
+    }
+  } else {
+    showSave(false);
   }
+  try { localStorage.setItem("adel_db", JSON.stringify(db)); } catch (e) {}
+}
+function touchLocal() {
+  try { localStorage.setItem("adel_db", JSON.stringify(db)); } catch (e) {}
+}
+
+function watchCloud() {
+  // تحديث حي: أي تغيير من جهاز تاني بيظهر فوراً على الشاشة دي
+  if (!cloudAvailable || cloudBlocked) return;
+  for (const name of ENTITIES) {
+    onSnapshot(colRef(name), (snap) => {
+      if (!bootSyncDone) return;
+      const rows = [];
+      snap.forEach((d) => { const v = d.data(); if (v && typeof v === "object") rows.push(v); });
+      const before = JSON.stringify(db[name]);
+      db[name] = normalizeList(name, rows);
+      if (JSON.stringify(db[name]) === before) return;
+      markAllSaved(name);
+      if (me) {
+        renderHeaderPoints();
+        if (currentTab === "home") { renderStudentStats(); renderHomeLessons(); renderHomeForum(); renderHomeLeaderboard(); }
+        if (currentTab === "leaderboard") renderLeaderboard();
+        if (currentTab === "quizzes") renderQuizList();
+        if (currentTab === "forum") renderForum();
+      }
+      const ae = document.activeElement;
+      const typing = ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" || ae.tagName === "SELECT");
+      if (teacherUnlocked && !typing && !$("teacherContainer").classList.contains("hidden")) renderTeacher();
+    }, () => {});
+  }
+  onSnapshot(SETTINGS_REF(), (snap) => {
+    if (!bootSyncDone || !snap.exists()) return;
+    db.settings = normalizeSettings(snap.data());
+    if (me) renderBanner();
+  }, () => {});
 }
 
 /* ---------- التنقل العام ---------- */
@@ -154,7 +317,6 @@ async function doLogin() {
   err.style.display = "none";
   if (!raw) { err.textContent = "اكتب كود الدخول الأول."; err.style.display = "block"; return; }
 
-  await loadDB();
   const st = db.students.find((s) => String(s.code).trim().toUpperCase() === raw);
   if (!st) {
     err.textContent = "الكود ده مش موجود. اتأكد منه أو كلم مستر عادل.";
@@ -197,9 +359,12 @@ function openStudent() {
   $("welcomeMeta").textContent = "فصل " + me.grade + " • كودك: " + me.code;
   $("streakBox").innerHTML = attendanceStreakHTML();
   renderBanner();
+  renderHeaderPoints();
+  renderPointsBar();
   renderStudentStats();
   renderHomeLessons();
   renderHomeForum();
+  renderHomeLeaderboard();
   switchTab("home");
 }
 
@@ -222,6 +387,8 @@ function switchTab(tab) {
   if (tab === "lessons") renderLessons();
   if (tab === "quizzes") renderQuizList();
   if (tab === "forum") renderForum();
+  if (tab === "leaderboard") renderLeaderboard();
+  if (tab === "ai") initAI();
   if (tab === "profile") renderProfile();
 }
 
@@ -430,13 +597,17 @@ function submitQuiz() {
     score, max: quiz.questions.length, submittedAt: Date.now(), review
   };
   db.submissions.push(sub);
-  saveDB();
+  const earned = score * 2 + (score === quiz.questions.length ? 5 : 0);
+  awardPoints(me.code, me.name, earned, "كويز: " + quiz.title + " (" + score + "/" + quiz.questions.length + ")");
+  saveDB(["submissions", "points"]);
   currentQuiz = null;
-  renderQuizResult(sub, quiz);
+  renderQuizResult(sub, quiz, earned);
+  renderHeaderPoints();
+  renderPointsBar();
   renderStudentStats();
 }
 
-function renderQuizResult(sub, quiz) {
+function renderQuizResult(sub, quiz, earned) {
   $("quizListWrap").classList.add("hidden");
   const t = $("quizTaking");
   t.classList.remove("hidden");
@@ -461,7 +632,9 @@ function renderQuizResult(sub, quiz) {
     '<button class="btn tiny ghost" id="backToQuizzes2">← رجوع للقائمة</button>' +
     '<div class="score-hero"><div>نتيجتك في ' + esc(quiz.title) + '</div>' +
     '<div class="big">' + sub.score + ' / ' + sub.max + '</div>' +
-    '<div>' + esc(msg) + '</div></div>' +
+    '<div>' + esc(msg) + '</div>' +
+    (earned ? '<div class="earned">+' + earned + ' ⭐ اتضافت لرصيد نقطك</div>' : '') +
+    '</div>' +
     '<h3 class="section-title">مراجعة الأسئلة</h3>' +
     reviewHTML +
     '</div>';
@@ -515,7 +688,7 @@ function openThread(id) {
     if (!body) { toast("اكتب الرد الأول."); return; }
     t.replies = t.replies || [];
     t.replies.push({ id: uid("rep"), author: me.name, code: me.code, body, createdAt: Date.now() });
-    saveDB();
+    saveDB(["forum"]);
     openThread(id);
     toast("✓ تم نشر ردك");
   });
@@ -538,12 +711,14 @@ async function submitNewPost() {
   const title = $("newPostTitle").value.trim();
   const body = $("newPostBody").value.trim();
   if (!title || !body) { toast("اكتب العنوان والسؤال."); return; }
-  await loadDB();
   db.forum.push({
     id: uid("th"), title, body, author: me.name, code: me.code, grade: me.grade,
     createdAt: Date.now(), replies: []
   });
-  await saveDB();
+  if (db.forum.filter((t) => t.code === me.code).length === 1) {
+    awardPoints(me.code, me.name, 5, "أول موضوع في المنتدى 🎉");
+  }
+  await saveDB(["forum", "points"]);
   $("newPostTitle").value = "";
   $("newPostBody").value = "";
   $("newPostForm").classList.add("hidden");
@@ -560,6 +735,8 @@ function renderProfile() {
     ? Math.round(subs.reduce((s, x) => s + (x.score / Math.max(1, x.max)) * 100, 0) / subs.length)
     : 0;
   $("profileStats").innerHTML =
+    '<div class="stat-card"><b class="gold-num">' + pointsOf(me.code) + '</b><span>رصيد النقط ⭐</span></div>' +
+    '<div class="stat-card"><b>' + rankOf(pointsOf(me.code)).icon + " " + esc(rankOf(pointsOf(me.code)).name) + '</b><span>الرتبة</span></div>' +
     '<div class="stat-card"><b>' + subs.length + '</b><span>امتحانات محسومة</span></div>' +
     '<div class="stat-card"><b>' + avg + '%</b><span>متوسط الدرجات</span></div>' +
     '<div class="stat-card"><b>' + present + '/' + att.length + '</b><span>نسبة الحضور</span></div>';
@@ -578,6 +755,387 @@ function renderProfile() {
       '<tr><td>' + esc(prettyDate(a.date)) + '</td><td class="' + (a.present ? "present" : "absent") + '">' + (a.present ? "حاضر ✓" : "غائب ✗") + '</td></tr>'
     ).join("") + '</table></div>'
     : '<div class="muted">لسه مفيش سجل حضور.</div>';
+}
+
+/* ============================================================
+   نظام النقط والرتب
+   ============================================================ */
+const RANKS = [
+  { name: "مبتدئ", min: 0, icon: "🌱" },
+  { name: "مجتهد", min: 50, icon: "📘" },
+  { name: "متميز", min: 150, icon: "⭐" },
+  { name: "نجم الفصل", min: 300, icon: "🌟" },
+  { name: "أسطورة الإنجليزي", min: 500, icon: "👑" }
+];
+function rankOf(pts) {
+  let r = RANKS[0];
+  for (const rk of RANKS) if (pts >= rk.min) r = rk;
+  return r;
+}
+function nextRankOf(pts) {
+  for (const rk of RANKS) if (pts < rk.min) return rk;
+  return null;
+}
+function pointsOf(code) {
+  return db.points.filter((p) => p.code === code).reduce((s, p) => s + p.amount, 0);
+}
+function awardPoints(code, name, amount, reason) {
+  if (!amount) return;
+  db.points.push({ id: uid("pt"), code, name, amount, reason, at: Date.now() });
+}
+function renderHeaderPoints() {
+  const el = $("studentBadge");
+  if (!el || !me) return;
+  const pts = pointsOf(me.code);
+  el.innerHTML = esc(me.name + " — " + me.grade) + ' <span class="pts">• ' + pts + ' ⭐</span>';
+}
+function renderPointsBar() {
+  const bar = $("pointsBar");
+  if (!bar || !me) return;
+  const pts = pointsOf(me.code);
+  const rank = rankOf(pts);
+  const next = nextRankOf(pts);
+  const from = rank.min;
+  const pct = next ? Math.min(100, Math.round(((pts - from) / (next.min - from)) * 100)) : 100;
+  bar.innerHTML =
+    '<div class="wallet"><span class="coin">⭐</span><span>' + pts + ' نقطة</span></div>' +
+    '<span class="rank-chip">' + rank.icon + " " + esc(rank.name) + '</span>' +
+    (next
+      ? '<div class="progress-track"><div class="progress-fill" style="width:' + pct + '%"></div></div>' +
+        '<span class="to-next">باقي ' + (next.min - pts) + ' نقطة لرتبة ' + next.icon + " " + esc(next.name) + '</span>'
+      : '<span class="to-next">وصلت لأعلى رتبة! 🎉</span>');
+}
+
+function rankedStudents() {
+  return db.students
+    .map((s) => ({ code: s.code, name: s.name, grade: s.grade, pts: pointsOf(s.code) }))
+    .sort((a, b) => b.pts - a.pts);
+}
+function renderHomeLeaderboard() {
+  const box = $("homeLeaderboard");
+  if (!box) return;
+  const top = rankedStudents().slice(0, 5);
+  box.innerHTML = top.length
+    ? '<table><tr><th>#</th><th>الطالب</th><th>الرتبة</th><th>النقط</th></tr>' +
+      top.map((s, i) => {
+        const r = rankOf(s.pts);
+        return '<tr class="rank-' + (i + 1) + '"><td class="rank-cell">' + (i + 1) + '</td><td><b>' + esc(s.name) + '</b> — ' + esc(s.grade) + '</td><td>' + r.icon + " " + esc(r.name) + '</td><td><b>' + s.pts + '</b> ⭐</td></tr>';
+      }).join("") + '</table>'
+    : '<div class="muted" style="padding:14px;">لسه مفيش نقط — ابدأ اكسب!</div>';
+}
+function renderLeaderboard() {
+  const all = rankedStudents();
+  const medals = ["🥇", "🥈", "🥉"];
+  const heights = ["120px", "90px", "74px"];
+  const order = [1, 0, 2]; // تاني، أول، تالت (شكل البوديوم)
+  let podiumHTML = "";
+  order.forEach((idx) => {
+    const s = all[idx];
+    if (!s) return;
+    podiumHTML += '<div class="podium-slot p' + (idx + 1) + '">' +
+      '<span class="slot-medal">' + medals[idx] + '</span>' +
+      '<div class="slot-name">' + esc(s.name) + '</div>' +
+      '<div class="slot-pts">' + s.pts + ' ⭐</div>' +
+      '<div class="slot-bar" style="height:' + heights[idx] + '"></div></div>';
+  });
+  $("leaderboardPodium").innerHTML = podiumHTML || '<div class="muted">لسه مفيش منافسين!</div>';
+
+  $("leaderboardTable").innerHTML = all.length
+    ? '<table><tr><th>#</th><th>الطالب</th><th>الفصل</th><th>الرتبة</th><th>النقط</th></tr>' +
+      all.map((s, i) => {
+        const r = rankOf(s.pts);
+        return '<tr class="rank-' + (i + 1) + '"><td class="rank-cell">' + (i + 1) + '</td><td><b>' + esc(s.name) + '</b></td><td>' + esc(s.grade) + '</td><td>' + r.icon + " " + esc(r.name) + '</td><td><b>' + s.pts + '</b> ⭐</td></tr>';
+      }).join("") + '</table>'
+    : '<div class="muted" style="padding:14px;">لسه مفيش طلاب.</div>';
+
+  renderRewards();
+}
+
+function renderRewards() {
+  const wrap = $("rewardsList");
+  if (!wrap || !me) return;
+  const pts = pointsOf(me.code);
+  const mine = db.redemptions.filter((r) => r.code === me.code);
+  wrap.innerHTML = (db.rewards.length ? db.rewards : [])
+    .map((r) => {
+      const bought = mine.filter((x) => x.rewardId === r.id).length;
+      const can = pts >= r.cost;
+      return '<div class="reward-card">' +
+        '<span class="reward-emoji">' + esc(r.emoji || "🎁") + '</span>' +
+        '<div class="reward-name">' + esc(r.name) + '</div>' +
+        '<span class="reward-cost' + (can ? " affordable" : "") + '">' + r.cost + ' ⭐</span>' +
+        '<div>' + (bought
+          ? '<span class="owned-chip">✓ مطلوبة (' + bought + ')</span>'
+          : '<button class="btn gold" data-redeem="' + esc(r.id) + '"' + (can ? "" : " disabled") + '>استبدال</button>') + '</div>' +
+        '</div>';
+    }).join("") || '<div class="muted">لسه مفيش مكافآت — المستر هيضيف قريب.</div>';
+
+  wrap.querySelectorAll("[data-redeem]").forEach((b) => {
+    b.addEventListener("click", async () => {
+      const r = db.rewards.find((x) => x.id === b.dataset.redeem);
+      if (!r) return;
+      const myPts = pointsOf(me.code);
+      if (myPts < r.cost) { toast("نقطك مش كفاية — كمّل اجمع! 💪"); return; }
+      awardPoints(me.code, me.name, -r.cost, "استبدال مكافأة: " + r.name);
+      db.redemptions.push({ id: uid("rd"), rewardId: r.id, rewardName: r.name, code: me.code, name: me.name, at: Date.now() });
+      await saveDB(["points", "redemptions"]);
+      renderHeaderPoints(); renderPointsBar(); renderLeaderboard();
+      toast("🎁 اتبعت طلبك لمستر عادل — استلم مكافأتك في الحصة!");
+    });
+  });
+}
+
+/* ============================================================
+   بنك المناهج المصرية — المنهج الجديد 2026/2027 من كتاب الوزارة
+   مصدر الوحدات: فهارس كتب الوزارة المعتمدة + كتب المكتبة الرسمية
+   (كل ترم فيه 6 وحدات بالظبط زي الكتاب الرسمي)
+   ============================================================ */
+const CURRICULUM = {
+  "1 Prim": { book: "English Primary 1 (منهج 2026)", terms: [
+    { label: "الترم الأول", units: ["Unit 1: Welcome to My School", "Unit 2: The Garden of Colors and Shapes", "Unit 3: I Love My Family", "Unit 4: My Body and My Senses", "Unit 5: On the Farm", "Unit 6: Animals Around Me"] },
+    { label: "الترم الثاني", units: ["Unit 1: My Week", "Unit 2: Feelings", "Unit 3: Seasons", "Unit 4: My House", "Unit 5: Neighborhood", "Unit 6: Story: Two Friends and One Apple"] }
+  ] },
+  "2 Prim": { book: "English Primary 2 (منهج 2026)", terms: [
+    { label: "الترم الأول", units: ["Unit 1: Let's Get Started", "Unit 2: Colors, Shapes, and Numbers", "Unit 3: Classroom Actions & Routines", "Unit 4: Everyday Life", "Unit 5: My Home", "Unit 6: Rooms at Home"] },
+    { label: "الترم الثاني", units: ["Unit 1: Our Environment", "Unit 2: At the Store", "Unit 3: Sports", "Unit 4: Transportation", "Unit 5: The Pyramids", "Unit 6: A Day with My Family"] }
+  ] },
+  "3 Prim": { book: "English Primary 3 (منهج 2026)", terms: [
+    { label: "الترم الأول", units: ["Unit 1: Let's Learn Together!", "Unit 2: My Family and I", "Unit 3: New Adventures", "Unit 4: Let's Tell Stories!", "Unit 5: Together Is Better", "Unit 6: Dare to Dream"] },
+    { label: "الترم الثاني", units: ["Unit 1: Safety", "Unit 2: Food and Health", "Unit 3: Heroes Around Us", "Unit 4: Living with Technology", "Unit 5: Animals and Habitats", "Unit 6: The Honest Choice"] }
+  ] },
+  "4 Prim": { book: "English Primary 4 (منهج 2026)", terms: [
+    { label: "الترم الأول", units: ["Unit 1: The Five Senses", "Unit 2: My Community", "Unit 3: Animals In Our World", "Unit 4: Egypt My Homeland", "Unit 5: A Day At Work", "Unit 6: The Hundred Dresses"] },
+    { label: "الترم الثاني", units: ["Unit 1: This is Where I Live", "Unit 2: Our World, Our Responsibility", "Unit 3: What's in the Package?", "Unit 4: Let's Celebrate", "Unit 5: Exploring Wonders in Egypt", "Unit 6: The Lost Kite"] }
+  ] },
+  "5 Prim": { book: "English Primary 5 (منهج 2026)", terms: [
+    { label: "الترم الأول", units: ["Unit 1: Food, Nature, and Culture", "Unit 2: My Healthy Body", "Unit 3: When Nature Changes", "Unit 4: My Community", "Unit 5: Our World, Our Resources", "Unit 6: The Talking Earth"] },
+    { label: "الترم الثاني", units: ["Unit 1: Hobbies Make Us Shine!", "Unit 2: At the Doctor's", "Unit 3: Suitcase Stories", "Unit 4: Jobs in The Animal Kingdom", "Unit 5: Our Solar System", "Unit 6: Offline but Happy"] }
+  ] },
+  "6 Prim": { book: "English Primary 6 (منهج 2026)", terms: [
+    { label: "الترم الأول", units: ["Unit 1: Amazing Places in Egypt", "Unit 2: Our Nature", "Unit 3: Community Builders", "Unit 4: Resources Around Us", "Unit 5: Made in Egypt", "Unit 6: The Water Savers"] },
+    { label: "الترم الثاني", units: ["Unit 1: Celebrating Creativity", "Unit 2: Wonderful Inventions", "Unit 3: Hidden Gems of Egypt", "Unit 4: Egypt on The Move", "Unit 5: Safe and Smart Transportation", "Unit 6: Story Time: The Library That Time Forgot"] }
+  ] },
+  "1 Prep": { book: "Hello! Beyond Words 1", terms: [
+    { label: "الترم الأول", units: ["Unit 1: A Great Summer", "Unit 2: My Network", "Unit 3: My Time", "Unit 4: Digital Life", "Unit 5: In Nature", "Unit 6: Food for Thought"] },
+    { label: "الترم الثاني", units: ["Unit 7: Helping Each Other to Learn", "Unit 8: New Life in Old Cities", "Unit 9: Plans with Friends", "Unit 10: The Online Generation", "Unit 11: Clean Transportation", "Unit 12: Sustainable Tourism"] }
+  ] },
+  "2 Prep": { book: "Hello! Beyond Words 2", terms: [
+    { label: "الترم الأول", units: ["Unit 1: Gen Alpha", "Unit 2: My Digital Footprint", "Unit 3: Facing Challenges", "Unit 4: Art and Expression", "Unit 5: Around the World", "Unit 6: Young Innovators"] },
+    { label: "الترم الثاني", units: ["Unit 7: My School Life", "Unit 8: Learn Smart, Learn Easy", "Unit 9: Jobs & Skills", "Unit 10: Storytelling", "Unit 11: Life in the Desert", "Unit 12: Our Incredible Earth"] }
+  ] },
+  "3 Prep": { book: "Hello! Beyond Words 3", terms: [
+    { label: "الترم الأول", units: ["Unit 1: Personal Identity", "Unit 2: Communication with Family and Friends", "Unit 3: Artificial Intelligence", "Unit 4: Screen Time", "Unit 5: Design Thinking", "Unit 6: Why Do We Like Stories?"] },
+    { label: "الترم الثاني", units: ["Unit 7: Sports", "Unit 8: Cultures and Traditions", "Unit 9: Courage and Survival", "Unit 10: Animal Adaptations", "Unit 11: Stories on the Move", "Unit 12: Leadership and Teamwork"] }
+  ] }
+};
+const GRADE_LABELS = { "1 Prim": "الأول الابتدائي", "2 Prim": "الثاني الابتدائي", "3 Prim": "الثالث الابتدائي", "4 Prim": "الرابع الابتدائي", "5 Prim": "الخامس الابتدائي", "6 Prim": "السادس الابتدائي", "1 Prep": "الأول الإعدادي", "2 Prep": "الثاني الإعدادي", "3 Prep": "الثالث الإعدادي" };
+function currentTermIndex() {
+  const m = new Date().getMonth() + 1; // 1-12
+  return (m >= 9 || m <= 1) ? 0 : 1;
+}
+const FALLBACK_QUESTIONS = {
+  grammar: [
+    { q: "Choose the correct form: She ___ to school every day.", choices: ["go", "goes", "going", "gone"], correct: 1 },
+    { q: "I ___ my homework yesterday.", choices: ["do", "does", "did", "doing"], correct: 2 },
+    { q: "They ___ watching TV now.", choices: ["is", "am", "are", "be"], correct: 2 },
+    { q: "We have lived here ___ 2015.", choices: ["for", "since", "ago", "during"], correct: 1 },
+    { q: "He is ___ than his brother.", choices: ["tall", "taller", "tallest", "more tall"], correct: 1 },
+    { q: "There ___ some milk in the fridge.", choices: ["is", "are", "were", "be"], correct: 0 },
+    { q: "I'm looking forward to ___ you.", choices: ["see", "saw", "seeing", "sees"], correct: 2 },
+    { q: "If it rains, we ___ stay at home.", choices: ["will", "would", "did", "are"], correct: 0 }
+  ],
+  vocabulary: [
+    { q: "What is the opposite of 'easy'?", choices: ["simple", "difficult", "happy", "fast"], correct: 1 },
+    { q: "A place where you buy medicine:", choices: ["bakery", "library", "pharmacy", "stadium"], correct: 2 },
+    { q: "The past of 'buy' is:", choices: ["buyed", "bought", "buys", "buying"], correct: 1 },
+    { q: "Which word is a fruit?", choices: ["carrot", "potato", "banana", "onion"], correct: 2 },
+    { q: 'The synonym of "happy" is:', choices: ["sad", "glad", "angry", "tired"], correct: 1 },
+    { q: "Doctors work in a ___.", choices: ["hospital", "school", "farm", "factory"], correct: 0 }
+  ]
+};
+
+/* ============================================================
+   الذكاء الاصطناعي (Gemini) — مولد كويز + مساعد + اختبار المفتاح
+   ============================================================ */
+function aiAvailable() {
+  return !!(db.settings && db.settings.aiKey && String(db.settings.aiKey).trim().startsWith("AIza"));
+}
+const AI_MODELS = {
+  "gemini-2.5-flash": "Gemini 2.5 Flash — سريع واقتصادي",
+  "gemini-2.5-pro": "Gemini 2.5 Pro — أقوى (أبطأ وأغلى)",
+  "gemini-2.0-flash": "Gemini 2.0 Flash — قديم لكن مستقر"
+};
+function geminiErrorHint(status, raw) {
+  const t = (raw || "").slice(0, 300);
+  if (status === 400 && /API key not valid|API_KEY_INVALID/i.test(t)) return "المفتاح مش صحيح — جيب مفتاح جديد من aistudio.google.com/apikey";
+  if (status === 400 && /User location is not supported/i.test(t)) return "جوجل مش مدعم في بلد السيرفر — جرب من شبكة تانية";
+  if (status === 403) return "المفتاح ممنوع من الوصول للنموذج ده — اتأكد إن Generative Language API مفعّلة في Google Cloud";
+  if (status === 404) return "اسم النموذج مش موجود — جرب نموذج تاني من القائمة";
+  if (status === 429) return "تجاوزت الحد المسموح من الطلبات — استنى شوية وجرب تاني";
+  if (status >= 500) return "مشكلة من سيرفرات جوجل — جرب تاني بعد شوية";
+  return "خطأ من الخدمة (" + status + "): " + t;
+}
+async function geminiText(systemPrompt, userPrompt, jsonMode) {
+  const model = (db.settings && db.settings.aiModel) || "gemini-2.5-flash";
+  const key = String(db.settings.aiKey).trim();
+  const body = {
+    systemInstruction: { parts: [{ text: systemPrompt }] },
+    contents: [{ role: "user", parts: [{ text: userPrompt }] }],
+    generationConfig: jsonMode
+      ? { responseMimeType: "application/json", temperature: 1.0 }
+      : { temperature: 0.7 }
+  };
+  let res;
+  try {
+    res = await fetch(
+      "https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent?key=" + encodeURIComponent(key),
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }
+    );
+  } catch (netErr) {
+    throw new Error("مشكلة إنترنت — المنصة مش قادرة توصل لسيرفرات جوجل. اتأكد من الاتصال.");
+  }
+  if (!res.ok) {
+    const errText = await res.text().catch(() => "");
+    throw new Error(geminiErrorHint(res.status, errText));
+  }
+  const data = await res.json();
+  const cand = data && data.candidates && data.candidates[0];
+  const text = cand && cand.content && cand.content.parts && cand.content.parts.map((p) => p.text || "").join("");
+  if (!text) {
+    if (cand && cand.finishReason === "SAFETY") throw new Error("الرد اتحجب بفلتر المحتوى — جرب صياغة تانية");
+    throw new Error("رد فارغ من الذكاء الاصطناعي");
+  }
+  return text;
+}
+
+async function aiTestKey() {
+  // اختبار حقيقي: ابعث طلب بسيط وشوف الرد
+  if (!aiAvailable()) return { ok: false, msg: "مفيش مفتاح — الصق المفتاح الأول (يبدأ بـ AIza)" };
+  const oldModel = db.settings.aiModel;
+  const models = [oldModel || "gemini-2.5-flash", "gemini-2.5-flash", "gemini-2.0-flash"].filter((m, i, a) => a.indexOf(m) === i);
+  let lastErr = null;
+  for (const m of models) {
+    try {
+      db.settings.aiModel = m;
+      const reply = await geminiText("Reply with exactly: OK", "ping", false);
+      if (reply) {
+        db.settings.aiModel = m; // النموذج الشغال
+        return { ok: true, msg: "الاتصال ناجح ✓ — النموذج " + m + " شغال", model: m };
+      }
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  db.settings.aiModel = oldModel;
+  return { ok: false, msg: lastErr ? lastErr.message : "فشل الاتصال بكل النماذج" };
+}
+
+async function aiGenerateQuizQuestions(grade, termIdx, unit, count) {
+  const c = CURRICULUM[grade];
+  const book = c ? c.book : "English";
+  const termLabel = c && c.terms[termIdx] ? c.terms[termIdx].label : "";
+  const sys = "You are an expert Egyptian English curriculum item writer for the Egyptian Ministry of Education textbooks (" + book + ", " + termLabel + "). You write multiple-choice questions exactly matching the vocabulary, grammar and topics of the requested unit, appropriate for the students' age. Output ONLY valid JSON.";
+  const user = 'Create ' + count + ' multiple-choice English questions for Egyptian grade "' + (GRADE_LABELS[grade] || grade) + '" from the textbook "' + book + '", ' + termLabel + ', unit "' + unit + '".\n' +
+    'Rules:\n- 4 answer options each, exactly one correct.\n- Mix: vocabulary, grammar, and one dialogue completion if suitable.\n- Simple, clear wording suitable for Egyptian primary/prep students.\n- Distractors must be plausible but definitely wrong.\n' +
+    'Return JSON: {"questions":[{"q":"question text","choices":["a","b","c","d"],"correct":0}]} (correct = index 0-3)';
+  const raw = await geminiText(sys, user, true);
+  const cleaned = raw.replace(/^```json\s*/i, "").replace(/^```\s*/, "").replace(/```\s*$/, "");
+  const parsed = JSON.parse(cleaned);
+  const qs = (parsed.questions || parsed || []).filter((x) => x && x.q && Array.isArray(x.choices) && x.choices.length >= 2 && typeof x.correct === "number");
+  if (!qs.length) throw new Error("صيغة الأسئلة الراجعة من الـ AI مش صحيحة");
+  return qs.slice(0, count).map((x) => ({ q: String(x.q), choices: x.choices.map(String).slice(0, 4), correct: Math.min(3, Math.max(0, x.correct)) }));
+}
+
+function fallbackQuizQuestions(count) {
+  const pool = [...FALLBACK_QUESTIONS.grammar, ...FALLBACK_QUESTIONS.vocabulary];
+  const shuffled = pool.sort(() => Math.random() - 0.5);
+  return shuffled.slice(0, Math.min(count, pool.length));
+}
+
+let aiMessages = [];
+const AI_SUGGESTIONS = [
+  "إيه الفرق بين since و for؟",
+  "اشرحلي Present Perfect ببساطة",
+  "إيه معنى كلمة environment؟",
+  "صحّحلي: He go to school"
+];
+function initAI() {
+  const status = $("aiStatus");
+  if (!status) return;
+  if (aiAvailable()) {
+    status.textContent = "متصل بـ Gemini ✓ (" + (db.settings.aiModel || "gemini-2.5-flash") + ")";
+    status.className = "chip green";
+  } else {
+    status.textContent = "وضع مبسط (بدون مفتاح AI)";
+    status.className = "chip gray";
+  }
+  if (!$("aiMessages").dataset.seeded) {
+    $("aiMessages").dataset.seeded = "1";
+    aiMessages.push({ role: "bot", text: "أهلاً يا " + (me ? me.name.split(" ")[0] : "صديقي") + "! 👋 أنا مساعدك الذكي في الإنجليزي. اسألني أي حاجة في القواعد أو المفردات أو الترجمة، وهشرحها ليك ببساطة." });
+    renderAIMessages();
+    renderAISuggestions();
+  }
+}
+function renderAISuggestions() {
+  const box = $("aiSuggestions");
+  if (!box) return;
+  box.innerHTML = AI_SUGGESTIONS.map((s) => '<button type="button" data-sug="' + esc(s) + '">' + esc(s) + '</button>').join("");
+  box.querySelectorAll("[data-sug]").forEach((b) => {
+    b.addEventListener("click", () => { $("aiInput").value = b.dataset.sug; sendAIMessage(); });
+  });
+}
+function renderAIMessages() {
+  const box = $("aiMessages");
+  if (!box) return;
+  box.innerHTML = aiMessages.map((m) =>
+    '<div class="ai-msg ' + (m.role === "user" ? "user" : "bot") + '">' +
+    (m.role === "bot" ? '<span class="ai-label">🤖 مساعد مستر عادل</span>' : "") +
+    esc(m.text) + '</div>'
+  ).join("");
+  box.scrollTop = box.scrollHeight;
+}
+function aiFallbackReply(q) {
+  const lower = q.toLowerCase();
+  if (lower.includes("since") && lower.includes("for")) {
+    return "الفرق ببساطة:\n• since + نقطة زمنية محددة (since 2015, since Monday)\n• for + مدة زمنية (for 3 years, for two hours)\nمثال: I have lived here since 2020. / I have lived here for 6 years.";
+  }
+  if (lower.includes("present perfect")) {
+    return "Present Perfect ببساطة:\n• التكوين: have/has + التصريف التالت\n• بيحصل في الماضي بس مفعوله لسه موجود دلوقتي\n• كلمات دالة: just, already, yet, ever, never, since, for\nمثال: I have finished my homework. (خلصته وخلاص، مفعوله موجود)";
+  }
+  if (lower.includes("معنى") || lower.includes("ايه معنى")) {
+    return "أنا في الوضع المبسط مش بقدر أترجم أي كلمة، بس مستر عادل يقدر يفعّل الذكاء الاصطناعي الكامل بوضع مفتاح Gemini في لوحة التحكم، وساعتها هرد على أي كلمة فوراً! 🚀";
+  }
+  return "سؤال جميل! 👌 أنا دلوقتي في الوضع المبسط، فإجابتي محدودة. اطلب من مستر عادل يضيف مفتاح الذكاء الاصطناعي من لوحة التحكم وهجاوبك على أي حاجة بالتفصيل، وبين الوقت اكتب سؤالك في المنتدى وهيرد عليك المستر أو زمايلك.";
+}
+async function sendAIMessage() {
+  const input = $("aiInput");
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = "";
+  aiMessages.push({ role: "user", text });
+  renderAIMessages();
+
+  const typing = document.createElement("div");
+  typing.className = "ai-msg bot ai-typing";
+  typing.innerHTML = "<span></span><span></span><span></span>";
+  $("aiMessages").appendChild(typing);
+  $("aiMessages").scrollTop = $("aiMessages").scrollHeight;
+
+  let reply = "";
+  if (aiAvailable()) {
+    try {
+      const sys = "أنت مساعد تعليمي ودود لطلاب مصر في المرحلة الابتدائية والإعدادية لمادة اللغة الإنجليزية (منهج وزارة التربية والتعليم المصري الجديد 2026: كتب English Primary للابتدائي وHello! Beyond Words للإعدادي). أجب بالعربية المصرية البسيطة مع أمثلة إنجليزية واضحة، بأسلوب محفز وقصير (3-8 أسطر). لو الطالب كتب جملة إنجليزية فيها خطأ، صححها واشرح الخطأ ببساطة. ممنوع أي محتوى غير تعليمي.";
+      reply = await geminiText(sys, text, false);
+    } catch (e) {
+      reply = "⚠ " + (e && e.message ? e.message : "حصلت مشكلة في الاتصال بالذكاء الاصطناعي") + "\nجرب تاني، ولو استمرت المشكلة كلم مستر عادل يضغط «اختبار المفتاح» في الإعدادات.";
+    }
+  } else {
+    await new Promise((r) => setTimeout(r, 500));
+    reply = aiFallbackReply(text);
+  }
+  typing.remove();
+  aiMessages.push({ role: "bot", text: reply });
+  renderAIMessages();
 }
 
 /* ============================================================
@@ -606,6 +1164,56 @@ function sectionCard(title, inner) {
   return '<div class="teacher-section"><h3>' + title + '</h3>' + inner + '</div>';
 }
 
+function renderTeacherAdminExtras() {
+  const rw = $("adminRewardsList");
+  if (rw) {
+    rw.innerHTML = db.rewards.length
+      ? db.rewards.map((r) =>
+        '<div class="list-item"><span>' + esc(r.emoji || "🎁") + " <b>" + esc(r.name) + '</b> — ' + r.cost + ' ⭐</span>' +
+        '<span class="actions"><button class="btn tiny danger" data-del-reward="' + esc(r.id) + '">حذف</button></span></div>'
+      ).join("") : '<div class="muted">مفيش مكافآت.</div>';
+    rw.querySelectorAll("[data-del-reward]").forEach((b) => {
+      b.addEventListener("click", async () => {
+        if (!confirm("حذف المكافأة؟")) return;
+        db.rewards = db.rewards.filter((r) => r.id !== b.dataset.delReward);
+        await cloudDelete("rewards", b.dataset.delReward);
+        touchLocal();
+        renderTeacher();
+      });
+    });
+  }
+  const rd = $("redemptionList");
+  if (rd) {
+    const pending = db.redemptions.slice().reverse();
+    rd.innerHTML = pending.length
+      ? pending.map((r) =>
+        '<div class="list-item"><span>' + (r.status ? "✅" : "<span class='pending-dot'></span>") + " <b>" + esc(r.name) + '</b> طلب «' + esc(r.rewardName) + '» — ' + r.cost + ' نقطة' + (r.status ? ' <span class="chip green">' + esc(r.status) + '</span>' : '') + '</span>' +
+        '<span class="actions">' + (r.status ? "" :
+          '<button class="btn tiny primary" data-approve-redeem="' + esc(r.id) + '">تم التسليم</button>' +
+          '<button class="btn tiny danger" data-reject-redeem="' + esc(r.id) + '">رفض وإرجاع</button>') + '</span></div>'
+      ).join("") : '<div class="muted">مفيش طلبات لسه.</div>';
+    rd.querySelectorAll("[data-approve-redeem]").forEach((b) => {
+      b.addEventListener("click", async () => {
+        const r = db.redemptions.find((x) => x.id === b.dataset.approveRedeem);
+        if (r) { r.status = "تم التسليم"; await saveDB(["redemptions"]); renderTeacher(); toast("✓ اتعلمت كمُسلّمة"); }
+      });
+    });
+    rd.querySelectorAll("[data-reject-redeem]").forEach((b) => {
+      b.addEventListener("click", async () => {
+        if (!confirm("رفض الطلب ورجّع النقط للطالب؟")) return;
+        const r = db.redemptions.find((x) => x.id === b.dataset.rejectRedeem);
+        if (r) {
+          awardPoints(r.code, r.name, r.cost, "إرجاع نقط مكافأة مرفوضة: " + r.rewardName);
+          r.status = "مرفوض — اترجعت النقط";
+          await saveDB(["redemptions", "points"]);
+          renderTeacher();
+          toast("✓ اترجعت النقط للطالب");
+        }
+      });
+    });
+  }
+}
+
 function renderTeacher() {
   $("teacherDbMode").textContent = cloudAvailable ? "متصل بالسحابة ✓" : "وضع محلي";
   const c = $("teacherContainer");
@@ -613,6 +1221,8 @@ function renderTeacher() {
     '<div class="notice gold">📌 الأكواد دي هي اللي يتوزع على الطلاب — كل طالب بيكتب كوده في صفحة الدخول.</div>' +
     sectionCard("إحصائيات سريعة", teacherStatsHTML()) +
     sectionCard("الطلاب والأكواد", teacherStudentsHTML()) +
+    sectionCard("⭐ النقط والمكافآت", teacherPointsHTML()) +
+    sectionCard("📨 طلبات استبدال المكافآت", '<div id="redemptionList"></div>') +
     sectionCard("الحضور", teacherAttendanceHTML()) +
     sectionCard("الامتحانات والكويزات", teacherQuizzesHTML()) +
     sectionCard("النتائج", teacherResultsHTML()) +
@@ -627,6 +1237,7 @@ function renderTeacher() {
     '<div style="height:40px;"></div>';
 
   bindTeacherEvents();
+  renderTeacherAdminExtras();
 }
 
 function teacherStatsHTML() {
@@ -699,9 +1310,16 @@ function openAttendanceSheet(date, gradeFilter) {
       const code = b.dataset.code;
       const present = b.dataset.att === "1";
       const rec = db.attendance.find((a) => a.date === date && a.code === code);
-      if (rec) rec.present = present;
-      else db.attendance.push({ id: uid("att"), date, code, present });
-      await saveDB();
+      if (rec) {
+        rec.present = present;
+      } else {
+        db.attendance.push({ id: uid("att"), date, code, present });
+        if (present) {
+          const st = db.students.find((s) => s.code === code);
+          awardPoints(code, st ? st.name : "", 3, "حضور يوم " + date);
+        }
+      }
+      await saveDB(["attendance", "points"]);
       openAttendanceSheet(date, gradeFilter);
     });
   });
@@ -717,7 +1335,90 @@ function teacherQuizzesHTML() {
       '<button class="btn tiny ghost" data-edit-quiz="' + esc(q.id) + '">تعديل الأسئلة</button>' +
       '<button class="btn tiny danger" data-del-quiz="' + esc(q.id) + '">حذف</button></span></div>'
     ).join("") : '<div class="muted">مفيش امتحانات.</div>') + '</div>' +
-    '<div id="quizEditor"></div>';
+    '<div id="quizEditor"></div>' +
+    '<h4 class="ai-quiz-heading">✨ إنشاء كويز بالذكاء الاصطناعي (منهج الوزارة 2026)</h4>' +
+    '<div class="ai-quiz-box">' +
+    '<div class="grid-3">' +
+    '<div class="field"><label>الصف</label><select id="aiGrade">' +
+      Object.keys(CURRICULUM).map((g) => '<option value="' + g + '">' + (GRADE_LABELS[g] || g) + ' — ' + CURRICULUM[g].book + '</option>').join("") +
+    '</select></div>' +
+    '<div class="field"><label>الترم</label><select id="aiTerm"></select></div>' +
+    '<div class="field"><label>الوحدة (من كتاب الوزارة)</label><select id="aiUnit"></select></div>' +
+    '</div>' +
+    '<div class="grid-2">' +
+    '<div class="field"><label>عدد الأسئلة</label><select id="aiCount"><option>5</option><option selected>8</option><option>10</option></select></div>' +
+    '<div class="field"><label>المصدر</label><select id="aiMode"><option value="ai">🤖 ذكاء اصطناعي (يحتاج مفتاح Gemini)</option><option value="fallback">📦 بنك أسئلة جاهز (بدون مفتاح)</option></select></div>' +
+    '</div>' +
+    '<button class="btn gold block" id="aiGenerateBtn">✨ توليد الكويز</button>' +
+    '<div id="aiGenStatus" class="muted" style="margin-top:8px;"></div>' +
+    '</div>';
+}
+
+function fillUnitSelect() {
+  const gradeSel = $("aiGrade");
+  const termSel = $("aiTerm");
+  const unitSel = $("aiUnit");
+  if (!gradeSel || !unitSel) return;
+  const c = CURRICULUM[gradeSel.value];
+  if (!c) return;
+  if (termSel) {
+    const cur = currentTermIndex();
+    termSel.innerHTML = c.terms.map((t, i) =>
+      '<option value="' + i + '"' + (i === cur ? " selected" : "") + '>' + esc(t.label) + '</option>'
+    ).join("");
+    if (!termSel.dataset.bound) {
+      termSel.dataset.bound = "1";
+      termSel.addEventListener("change", fillUnitSelect);
+    }
+  }
+  const ti = termSel ? Number(termSel.value || 0) : currentTermIndex();
+  const term = c.terms[ti] || c.terms[0];
+  unitSel.innerHTML = term.units.map((u) => '<option>' + esc(u) + '</option>').join("");
+}
+
+async function runQuizGeneration() {
+  const btn = $("aiGenerateBtn");
+  const status = $("aiGenStatus");
+  const grade = $("aiGrade").value;
+  const termIdx = $("aiTerm") ? Number($("aiTerm").value || 0) : currentTermIndex();
+  const unit = $("aiUnit").value;
+  const count = Number($("aiCount").value);
+  const mode = $("aiMode").value;
+  const useAI = mode === "ai" && aiAvailable();
+  if (mode === "ai" && !aiAvailable()) {
+    status.innerHTML = '<span class="gen-status-err">محتاج مفتاح Gemini — ضيفه من الإعدادات، أو اختار «بنك أسئلة جاهز».</span>';
+    return;
+  }
+  btn.disabled = true;
+  status.innerHTML = '⏳ جاري توليد الأسئلة' + (useAI ? ' بالذكاء الاصطناعي' : '') + '<span class="spinner-mini"></span>';
+  try {
+    let questions;
+    if (useAI) {
+      questions = await aiGenerateQuizQuestions(grade, termIdx, unit, count);
+    } else {
+      await new Promise((r) => setTimeout(r, 400));
+      questions = fallbackQuizQuestions(count);
+    }
+    const c = CURRICULUM[grade];
+    const termLabel = c && c.terms[termIdx] ? c.terms[termIdx].label : "";
+    const quiz = {
+      id: uid("qz"),
+      title: (useAI ? "🤖 " : "📦 ") + unit + " — " + (c ? c.book : grade),
+      desc: "كويز " + (useAI ? "مولّد بالذكاء الاصطناعي" : "من البنك الجاهز") + " • " + unit + " • " + (c ? c.book : "") + " • " + termLabel,
+      date: todayStr(),
+      questions,
+      generatedBy: useAI ? "ai" : "bank",
+      gradeTag: grade,
+      termIdx
+    };
+    db.quizzes.push(quiz);
+    await saveDB(["quizzes"]);
+    status.innerHTML = '<span class="gen-status-ok">✓ اتولد كويز «' + esc(quiz.title) + '" بـ ' + questions.length + ' سؤال — موجود دلوقتي عند الطلاب!</span>';
+    renderTeacher();
+  } catch (e) {
+    status.innerHTML = '<span class="gen-status-err">✗ ' + esc(e.message || "خطأ غير متوقع") + '</span>';
+  }
+  btn.disabled = false;
 }
 
 let editQuizId = null;
@@ -759,7 +1460,7 @@ function openQuizEditor(qid) {
     ed.querySelectorAll("[data-qcorrect]").forEach((inp) => {
       q.questions[Number(inp.dataset.qcorrect)].correct = Math.max(0, Math.min(3, Number(inp.value) - 1));
     });
-    await saveDB();
+    await saveDB(["quizzes"]);
     toast("✓ تم حفظ الامتحان");
     renderTeacher();
   });
@@ -796,12 +1497,43 @@ function teacherForumHTML() {
 }
 
 function teacherSettingsHTML() {
+  const modelsHTML = Object.keys(AI_MODELS).map((m) =>
+    '<option value="' + m + '"' + ((db.settings.aiModel || "gemini-2.5-flash") === m ? " selected" : "") + '>' + esc(AI_MODELS[m]) + '</option>'
+  ).join("");
   return '<div class="grid-2">' +
     '<div class="field"><label>كلمة سر اللوحة</label><input id="setPass" value="' + esc(db.settings.teacherPass) + '"></div>' +
     '<div class="field"><label>رقم واتساب المنصة (دولي بدون +)</label><input id="setWa" value="' + esc(db.settings.whatsapp || "") + '" placeholder="201012345678"></div>' +
     '</div>' +
     '<div class="field"><label>إعلان للطلاب (بيظهر في الرئيسية)</label><input id="setBanner" value="' + esc(db.settings.banner || "") + '" placeholder="مثال: امتحان الشهر الأسبوع الجاي — ذاكروا كويس!"></div>' +
+    '<div class="grid-2">' +
+    '<div class="field"><label>🔑 مفتاح Google AI (Gemini) — للمساعد الذكي ومولد الكويزات</label><input id="setAiKey" value="' + esc(db.settings.aiKey || "") + '" placeholder="الصق المفتاح هنا (يبدأ بـ AIza...)"></div>' +
+    '<div class="field"><label>نموذج الذكاء الاصطناعي</label><select id="setAiModel">' + modelsHTML + '</select></div>' +
+    '</div>' +
+    '<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;">' +
+    '<button class="btn gold" id="testAiBtn">🔌 اختبار المفتاح والاتصال</button>' +
+    '<span id="aiTestStatus"></span>' +
+    '</div>' +
+    '<div class="notice gold">🔑 المفتاح بيتخزن مع بيانات المنصة ويُستخدم من المتصفح مباشرة — احفظه هنا بس ومتشاركش رابط اللوحة مع حد. جيب مفتاحك مجاناً من aistudio.google.com/apikey</div>' +
     '<button class="btn primary" id="saveSettingsBtn">💾 حفظ الإعدادات</button>';
+}
+
+function teacherPointsHTML() {
+  return '<div class="grid-3">' +
+    '<div class="field"><label>اسم المكافأة الجديدة</label><input id="nrName" placeholder="مثال: +10 درجات في كويز"></div>' +
+    '<div class="field"><label>السعر بالنقط</label><input type="number" id="nrCost" placeholder="100" min="1"></div>' +
+    '<div class="field"><label>الإيموجي</label><input id="nrEmoji" placeholder="🎁" maxlength="4"></div>' +
+    '</div>' +
+    '<button class="btn primary" id="addRewardBtn">+ إضافة مكافأة</button>' +
+    '<div id="adminRewardsList" style="margin-top:8px;"></div>' +
+    '<div style="margin-top:16px;border-top:1px dashed var(--line);padding-top:14px;">' +
+    '<div class="grid-3">' +
+    '<div class="field"><label>نقط يدوية — الطالب</label><select id="ptStudent">' + db.students.map((s) => '<option value="' + esc(s.code) + '">' + esc(s.name) + ' (' + esc(s.code) + ')</option>').join("") + '</select></div>' +
+    '<div class="field"><label>العدد (+ إضافة / - خصم)</label><input type="number" id="ptAmount" placeholder="10"></div>' +
+    '<div class="field"><label>السبب</label><input id="ptReason" placeholder="مشاركة ممتازة في الحصة"></div>' +
+    '</div>' +
+    '<button class="btn gold" id="addPointsBtn">⭐ تطبيق النقط</button>' +
+    '<div class="notice gold" style="margin-top:12px;margin-bottom:0;">النقط التلقائية: حضور = +3 • كل إجابة صح في كويز = +2 • النوبة الكاملة = +5 إضافية • أول موضوع منتدى = +5</div>' +
+    '</div>';
 }
 
 function bindTeacherEvents() {
@@ -811,10 +1543,9 @@ function bindTeacherEvents() {
     const grade = $("nsGrade").value.trim() || "عام";
     const phone = $("nsPhone").value.trim();
     if (!name) { toast("اكتب اسم الطالب."); return; }
-    await loadDB();
     const code = genCode(grade);
     db.students.push({ id: uid("st"), code, name, grade, phone });
-    await saveDB();
+    await saveDB(["students"]);
     renderTeacher();
     toast("✓ اتولد كود الطالب: " + code);
   });
@@ -827,9 +1558,9 @@ function bindTeacherEvents() {
     b.addEventListener("click", async () => {
       const key = b.dataset.delStudent;
       if (!confirm("حذف الطالب ده؟")) return;
-      await loadDB();
       db.students = db.students.filter((s) => (s.id || s.code) !== key);
-      await saveDB();
+      await cloudDelete("students", key);
+      touchLocal();
       renderTeacher();
     });
   });
@@ -842,17 +1573,23 @@ function bindTeacherEvents() {
     b.addEventListener("click", () => openAttendanceSheet(b.dataset.viewAtt, ""));
   });
 
+  // مولد الكويز بالذكاء الاصطناعي
+  if ($("aiGrade")) {
+    fillUnitSelect();
+    $("aiGrade").addEventListener("change", fillUnitSelect);
+    $("aiGenerateBtn").addEventListener("click", runQuizGeneration);
+  }
+
   // امتحانات
   $("createQuizBtn").addEventListener("click", async () => {
     const title = $("nqTitle").value.trim();
     if (!title) { toast("اكتب عنوان الامتحان."); return; }
-    await loadDB();
     const q = {
       id: uid("qz"), title, desc: $("nqDesc").value.trim(), date: todayStr(),
       questions: [{ q: "السؤال الأول؟", choices: ["", "", "", ""], correct: 0 }]
     };
     db.quizzes.push(q);
-    await saveDB();
+    await saveDB(["quizzes"]);
     renderTeacher();
     openQuizEditor(q.id);
   });
@@ -862,11 +1599,14 @@ function bindTeacherEvents() {
   document.querySelectorAll("[data-del-quiz]").forEach((b) => {
     b.addEventListener("click", async () => {
       if (!confirm("حذف الامتحان وكل نتايجه؟")) return;
-      await loadDB();
       const id = b.dataset.delQuiz;
+      const removedQ = db.quizzes.find((x) => x.id === id);
       db.quizzes = db.quizzes.filter((x) => x.id !== id);
+      const removedSubs = db.submissions.filter((s) => s.quizId === id);
       db.submissions = db.submissions.filter((s) => s.quizId !== id);
-      await saveDB();
+      if (removedQ) await cloudDelete("quizzes", removedQ.id || removedQ.code);
+      for (const rs of removedSubs) await cloudDelete("submissions", rs.id || rs.code);
+      touchLocal();
       renderTeacher();
     });
   });
@@ -875,22 +1615,22 @@ function bindTeacherEvents() {
   $("addLessonBtn").addEventListener("click", async () => {
     const title = $("nlTitle").value.trim();
     if (!title) { toast("اكتب عنوان الدرس."); return; }
-    await loadDB();
     const videos = $("nlVideos").value.split("\n").map((s) => s.trim()).filter(Boolean);
     db.lessons.push({
       id: uid("ls"), title, desc: $("nlDesc").value.trim(),
       date: todayStr(), videos, body: $("nlBody").value.trim()
     });
-    await saveDB();
+    await saveDB(["lessons"]);
     renderTeacher();
     toast("✓ تم إضافة الدرس");
   });
   document.querySelectorAll("[data-del-lesson]").forEach((b) => {
     b.addEventListener("click", async () => {
       if (!confirm("حذف الدرس؟")) return;
-      await loadDB();
+      const dl = db.lessons.find((x) => x.id === b.dataset.delLesson);
       db.lessons = db.lessons.filter((l) => l.id !== b.dataset.delLesson);
-      await saveDB();
+      if (dl) await cloudDelete("lessons", dl.id);
+      touchLocal();
       renderTeacher();
     });
   });
@@ -899,22 +1639,73 @@ function bindTeacherEvents() {
   document.querySelectorAll("[data-del-thread]").forEach((b) => {
     b.addEventListener("click", async () => {
       if (!confirm("حذف الموضوع وردوده؟")) return;
-      await loadDB();
+      const dt = db.forum.find((x) => x.id === b.dataset.delThread);
       db.forum = db.forum.filter((t) => t.id !== b.dataset.delThread);
-      await saveDB();
+      if (dt) await cloudDelete("forum", dt.id);
+      touchLocal();
       renderTeacher();
     });
   });
 
-  // إعدادات
+  // إعدادات + اختبار مفتاح AI
+  const testAiBtn = $("testAiBtn");
+  if (testAiBtn) {
+    testAiBtn.addEventListener("click", async () => {
+      const statusEl = $("aiTestStatus");
+      // نحفظ المفتاح المؤقت من الحقل عشان الاختبار يجرب اللي كتبه فعلاً
+      db.settings.aiKey = $("setAiKey").value.trim();
+      db.settings.aiModel = $("setAiModel").value;
+      statusEl.innerHTML = '<span class="muted">⏳ جاري الاختبار<span class="spinner-mini"></span></span>';
+      testAiBtn.disabled = true;
+      const res = await aiTestKey();
+      if (res.ok) {
+        await saveDB(["settings"]);
+        statusEl.innerHTML = '<span class="gen-status-ok">✓ ' + esc(res.msg) + '</span>';
+        toast("🤖 الذكاء الاصطناعي شغال دلوقتي!");
+      } else {
+        statusEl.innerHTML = '<span class="gen-status-err">✗ ' + esc(res.msg) + '</span>';
+      }
+      testAiBtn.disabled = false;
+    });
+  }
   $("saveSettingsBtn").addEventListener("click", async () => {
-    await loadDB();
     db.settings.teacherPass = $("setPass").value || db.settings.teacherPass;
     db.settings.whatsapp = $("setWa").value.trim();
     db.settings.banner = $("setBanner").value.trim();
-    await saveDB();
-    toast("✓ تم حفظ الإعدادات");
+    db.settings.aiKey = $("setAiKey").value.trim();
+    db.settings.aiModel = $("setAiModel").value;
+    await saveDB(["settings"]);
+    toast("✓ تم حفظ الإعدادات" + (db.settings.aiKey ? " — اضغط «اختبار المفتاح» للتأكد إنه شغال" : ""));
+    renderTeacher();
   });
+
+  // مكافآت
+  $("addRewardBtn").addEventListener("click", async () => {
+    const name = $("nrName").value.trim();
+    const cost = Number($("nrCost").value);
+    const emoji = $("nrEmoji").value.trim() || "🎁";
+    if (!name || !cost || cost < 1) { toast("اكتب اسم المكافأة وسعرها بالنقط."); return; }
+    db.rewards.push({ id: uid("rw"), name, cost, emoji });
+    await saveDB(["rewards"]);
+    renderTeacher();
+    toast("✓ تمت إضافة المكافأة");
+  });
+
+  // نقاط يدوية
+  $("addPointsBtn").addEventListener("click", async () => {
+    const code = $("ptStudent").value;
+    const amount = Number($("ptAmount").value);
+    const reason = $("ptReason").value.trim() || "بونص من المستر";
+    if (!amount) { toast("اكتب عدد النقط (+ أو -)."); return; }
+    const st = db.students.find((s) => s.code === code);
+    if (!st) { toast("اختار الطالب الأول."); return; }
+    awardPoints(code, st.name, amount, reason);
+    await saveDB(["points"]);
+    renderTeacher();
+    toast("✓ " + (amount > 0 ? "+" : "") + amount + " نقطة لـ " + st.name);
+  });
+
+  // طلبات الاستبدال — الربط في renderTeacherAdminExtras
 
   // نسخة احتياطية
   $("exportBtn").addEventListener("click", () => {
@@ -937,8 +1728,10 @@ function bindTeacherEvents() {
         if (!imported || !Array.isArray(imported.students)) throw new Error("ملف غير صالح");
         if (!confirm("هيتم استبدال كل البيانات بالنسخة المستوردة. متأكد؟")) return;
         db = Object.assign(JSON.parse(JSON.stringify(DEFAULT_DB)), imported);
-        db.settings = Object.assign({}, DEFAULT_DB.settings, imported.settings || {});
-        await saveDB();
+        db.settings = normalizeSettings(imported.settings);
+        for (const n of ENTITIES) db[n] = normalizeList(n, db[n]);
+        await cloudWriteAll();
+        touchLocal();
         renderTeacher();
         toast("✓ تم استيراد النسخة");
       } catch (err) { alert("تعذر قراءة الملف: " + err.message); }
@@ -971,6 +1764,10 @@ function bindGlobalEvents() {
   $("submitPostBtn").addEventListener("click", submitNewPost);
   $("cancelPostBtn").addEventListener("click", () => $("newPostForm").classList.add("hidden"));
 
+  // المساعد الذكي
+  $("aiSendBtn").addEventListener("click", sendAIMessage);
+  $("aiInput").addEventListener("keydown", (e) => { if (e.key === "Enter") sendAIMessage(); });
+
   $("openTeacherFromStudent").addEventListener("click", () => {
     if (teacherUnlocked) {
       $("teacherGate").classList.add("hidden");
@@ -990,6 +1787,7 @@ async function boot() {
   $("yearNow").textContent = new Date().getFullYear();
   bindGlobalEvents();
   await loadDB();
+  watchCloud();
   if (resumeSession()) return;
   show("loginView");
 }

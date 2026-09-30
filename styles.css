@@ -1,4 +1,4 @@
-/* منصة مستر عادل عزت — الثيم البحري الأكاديمي */
+/* منصة مستر عادل عزت — الثيم البحري الأكاديمي v2 (نقط + ذكاء اصطناعي) */
 :root{
   --navy:#0f2f47;
   --navy-deep:#0a2233;
@@ -14,11 +14,18 @@
   --ok:#1f8a5f;
   --radius:14px;
   --shadow:0 10px 30px rgba(15,47,71,.08);
+  --shadow-hover:0 16px 40px rgba(15,47,71,.14);
+  --grad-navy:linear-gradient(135deg,#0f2f47 0%,#14405e 55%,#1a4f73 100%);
+  --grad-gold:linear-gradient(135deg,#e8b654 0%,#c98f2b 100%);
 }
 *{box-sizing:border-box;}
+html{scroll-behavior:smooth;}
 html,body{margin:0;padding:0;}
 body{
-  background:var(--paper);
+  background:
+    radial-gradient(1200px 500px at 85% -10%, rgba(217,164,65,.07), transparent 60%),
+    radial-gradient(900px 420px at 5% 110%, rgba(20,116,111,.06), transparent 55%),
+    var(--paper);
   color:var(--ink);
   font-family:'Cairo','Segoe UI',Tahoma,sans-serif;
   font-size:15px;
@@ -26,10 +33,18 @@ body{
   min-height:100vh;
 }
 h1,h2,h3{line-height:1.4;margin:0 0 8px;}
+h4{margin:0 0 6px;}
 p{margin:0 0 8px;}
 .muted{color:var(--muted);font-size:13px;}
 .hidden{display:none !important;}
 .view{min-height:100vh;}
+@keyframes rise{from{opacity:0;transform:translateY(10px);}to{opacity:1;transform:translateY(0);}}
+@keyframes pop{0%{transform:scale(.9);opacity:0;}70%{transform:scale(1.04);}100%{transform:scale(1);opacity:1;}}
+@keyframes shine{0%{background-position:200% 0;}100%{background-position:-200% 0;}}
+@keyframes bob{0%,100%{transform:translateY(0);}50%{transform:translateY(-5px);}}
+@keyframes dots{0%,80%,100%{opacity:.25;}40%{opacity:1;}}
+.anim-rise{animation:rise .4s ease both;}
+.anim-pop{animation:pop .35s ease both;}
 
 /* ===== زرار عام ===== */
 .btn{
@@ -39,9 +54,12 @@ p{margin:0 0 8px;}
   display:inline-flex;align-items:center;justify-content:center;gap:6px;
 }
 .btn.primary{background:var(--navy);color:#fff;}
-.btn.primary:hover{background:var(--navy-deep);transform:translateY(-1px);}
-.btn.gold{background:var(--gold);color:#3a2c0d;}
-.btn.gold:hover{filter:brightness(1.06);}
+.btn.primary:hover{background:var(--navy-deep);transform:translateY(-1px);box-shadow:0 6px 16px rgba(15,47,71,.25);}
+.btn.gold{
+  background:var(--grad-gold);color:#3a2c0d;
+  box-shadow:0 4px 14px rgba(217,164,65,.35);
+}
+.btn.gold:hover{transform:translateY(-1px);box-shadow:0 8px 20px rgba(217,164,65,.45);}
 .btn.ghost{background:transparent;color:var(--navy);border-color:var(--line);}
 .btn.ghost:hover{background:#fff;border-color:var(--navy);}
 .btn.danger{background:transparent;color:var(--danger);border-color:#e5c4bd;}
@@ -73,18 +91,18 @@ p{margin:0 0 8px;}
   display:grid;grid-template-columns:1.15fr .95fr;gap:28px;align-items:center;
   min-height:100vh;
 }
-.login-hero{color:#fff;background:linear-gradient(150deg,var(--navy) 0%,var(--navy-deep) 70%);
-  border-radius:22px;padding:44px 38px;position:relative;overflow:hidden;box-shadow:var(--shadow);}
+.login-hero{color:#fff;background:var(--grad-navy);
+  border-radius:22px;padding:44px 38px;position:relative;overflow:hidden;box-shadow:var(--shadow-hover);}
 .login-hero::after{
   content:'';position:absolute;inset:auto -40px -60px auto;width:260px;height:260px;
   border-radius:50%;background:radial-gradient(circle,rgba(217,164,65,.28),transparent 65%);
 }
-.hero-crest{font-size:40px;margin-bottom:10px;}
+.hero-crest{font-size:40px;margin-bottom:10px;animation:bob 3.5s ease-in-out infinite;display:inline-block;}
 .login-hero h1{font-size:34px;font-weight:900;color:#fff;margin-bottom:6px;}
 .hero-sub{color:var(--gold-soft);font-size:15.5px;margin-bottom:18px;font-weight:600;}
 .hero-points{list-style:none;padding:0;margin:0 0 18px;}
 .hero-points li{
-  padding:7px 0 7px 0;padding-right:26px;position:relative;color:#dbe7f0;font-size:14px;
+  padding:7px 0;padding-right:26px;position:relative;color:#dbe7f0;font-size:14px;
 }
 .hero-points li::before{content:'✓';position:absolute;right:0;color:var(--gold);font-weight:900;}
 .hero-note{background:rgba(217,164,65,.14);border:1px solid rgba(217,164,65,.4);
@@ -100,7 +118,7 @@ p{margin:0 0 8px;}
 
 /* ===== الهيدر العام ===== */
 .app-header{
-  background:linear-gradient(120deg,var(--navy),var(--navy-deep));
+  background:var(--grad-navy);
   color:#fff;padding:14px 22px;display:flex;align-items:center;
   justify-content:space-between;gap:14px;position:sticky;top:0;z-index:50;
   box-shadow:0 4px 18px rgba(10,34,51,.25);
@@ -118,6 +136,7 @@ p{margin:0 0 8px;}
   background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.25);
   padding:6px 14px;border-radius:20px;font-size:12.5px;font-weight:700;
 }
+.user-badge .pts{color:var(--gold);font-weight:900;margin-right:6px;}
 .header-user .btn.ghost{color:#fff;border-color:rgba(255,255,255,.3);}
 .header-user .btn.ghost:hover{background:rgba(255,255,255,.12);}
 
@@ -167,10 +186,11 @@ p{margin:0 0 8px;}
 .chip.red{background:#fbeae6;color:var(--danger);border-color:#eaccc4;}
 .chip.blue{background:#e4edf8;color:#2d5c9e;border-color:#c8dbf2;}
 .chip.gray{background:#eef0f2;color:var(--muted);border-color:#dcdfe3;}
+.chip.purple{background:#efe9f9;color:#6b46c1;border-color:#dccdf2;}
 
 /* ===== كارت الترحيب والإحصائيات ===== */
 .welcome-card{
-  background:linear-gradient(120deg,var(--navy),#14405e);color:#fff;
+  background:var(--grad-navy);color:#fff;
   border-radius:18px;padding:22px 24px;display:flex;justify-content:space-between;
   align-items:center;gap:16px;box-shadow:var(--shadow);
 }
@@ -185,10 +205,58 @@ p{margin:0 0 8px;}
 .stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;}
 .stat-card{
   background:var(--card);border:1px solid var(--line);border-radius:14px;
-  padding:14px 16px;text-align:center;
+  padding:14px 16px;text-align:center;transition:all .18s;
 }
+.stat-card:hover{transform:translateY(-2px);box-shadow:var(--shadow);}
 .stat-card b{display:block;font-size:24px;color:var(--navy);font-weight:900;}
+.stat-card b.gold-num{color:var(--gold);}
 .stat-card span{font-size:12px;color:var(--muted);font-weight:600;}
+
+/* ===== شريط النقط والرتب ===== */
+.points-bar{
+  background:var(--card);border:1px solid var(--line);border-radius:14px;
+  padding:12px 16px;margin-bottom:14px;display:flex;align-items:center;
+  gap:14px;flex-wrap:wrap;
+}
+.points-bar .wallet{display:flex;align-items:center;gap:8px;font-weight:800;color:var(--navy);}
+.points-bar .wallet .coin{
+  width:34px;height:34px;border-radius:50%;background:var(--grad-gold);
+  display:inline-flex;align-items:center;justify-content:center;font-size:16px;
+  box-shadow:0 3px 10px rgba(217,164,65,.4);
+}
+.points-bar .rank-chip{
+  background:var(--grad-gold);color:#3a2c0d;font-weight:900;
+  padding:5px 14px;border-radius:20px;font-size:12.5px;
+  box-shadow:0 3px 10px rgba(217,164,65,.3);
+}
+.progress-track{background:#e9e4d5;border-radius:20px;height:9px;overflow:hidden;flex:1;min-width:140px;}
+.progress-fill{background:var(--grad-gold);height:100%;border-radius:20px;transition:width .5s ease;}
+.points-bar .to-next{font-size:12px;color:var(--muted);font-weight:700;}
+
+/* ===== بوديوم لوحة الشرف ===== */
+.podium{
+  display:flex;align-items:flex-end;justify-content:center;gap:14px;
+  margin:10px 0 22px;min-height:190px;
+}
+.podium .podium-slot{
+  text-align:center;flex:1;max-width:170px;animation:pop .45s ease both;
+}
+.podium .slot-medal{font-size:34px;display:block;margin-bottom:4px;}
+.podium .slot-name{font-weight:800;color:var(--navy);font-size:14px;margin-bottom:2px;}
+.podium .slot-pts{font-weight:900;color:var(--gold);font-size:13px;margin-bottom:8px;}
+.podium .slot-bar{
+  border-radius:12px 12px 0 0;background:var(--grad-navy);
+  box-shadow:0 6px 18px rgba(15,47,71,.22);position:relative;overflow:hidden;
+}
+.podium .slot-bar::after{
+  content:'';position:absolute;inset:0;
+  background:linear-gradient(110deg,transparent 30%,rgba(255,255,255,.14) 50%,transparent 70%);
+  background-size:200% 100%;animation:shine 2.8s linear infinite;
+}
+.podium .p1 .slot-bar{background:linear-gradient(135deg,#e8b654,#c98f2b);}
+.podium .p1 .slot-medal{animation:bob 3s ease-in-out infinite;}
+.podium .p2 .slot-bar{background:linear-gradient(135deg,#5d7285,#48596b);}
+.podium .p3 .slot-bar{background:linear-gradient(135deg,#b08157,#96683f);}
 
 /* ===== الجداول ===== */
 .table-wrap{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;}
@@ -197,20 +265,81 @@ th,td{padding:10px 14px;text-align:right;border-bottom:1px solid var(--line);}
 th{background:#faf8f2;color:var(--navy);font-size:12px;font-weight:800;}
 tr:last-child td{border-bottom:none;}
 tr:hover td{background:#fbfaf6;}
+.rank-cell{font-weight:900;color:var(--navy);}
+tr.rank-1 td{background:linear-gradient(90deg,#fdf6e4,#fbfaf6);}
+tr.rank-2 td{background:linear-gradient(90deg,#f0f3f6,#fbfaf6);}
+tr.rank-3 td{background:linear-gradient(90deg,#f9f0e6,#fbfaf6);}
 
-/* ===== فيديو / مودال ===== */
-.modal{
-  position:fixed;inset:0;background:rgba(10,34,51,.7);z-index:200;
-  display:flex;align-items:center;justify-content:center;padding:18px;
+/* ===== مكتبة المكافآت ===== */
+.reward-card{
+  background:var(--card);border:1px solid var(--line);border-radius:var(--radius);
+  padding:16px;text-align:center;transition:all .18s;position:relative;overflow:hidden;
 }
-.modal-inner{
-  background:#0d1f2d;border-radius:16px;width:100%;max-width:820px;overflow:hidden;
-  box-shadow:0 20px 60px rgba(0,0,0,.5);
+.reward-card:hover{transform:translateY(-3px);box-shadow:var(--shadow);border-color:var(--gold);}
+.reward-card .reward-emoji{font-size:30px;display:block;margin-bottom:6px;}
+.reward-card .reward-name{font-weight:800;color:var(--navy);font-size:14px;margin-bottom:4px;}
+.reward-card .reward-cost{
+  display:inline-block;background:var(--gold-soft);color:#7a5c1c;
+  font-weight:900;padding:3px 14px;border-radius:20px;font-size:13px;margin-bottom:10px;
 }
-.modal-inner iframe{width:100%;aspect-ratio:16/9;border:0;display:block;}
-.modal-bar{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:10px 14px;color:#fff;}
-.modal-bar b{font-size:14px;}
-.modal-bar .btn{background:rgba(255,255,255,.12);color:#fff;border-color:transparent;}
+.reward-card .reward-cost.affordable{background:var(--grad-gold);color:#3a2c0d;}
+.reward-card .owned-chip{display:inline-block;background:#e2f3ea;color:var(--ok);font-weight:800;padding:3px 12px;border-radius:20px;font-size:12px;}
+
+/* ===== المساعد الذكي ===== */
+.ai-chat-card{padding:0;overflow:hidden;}
+.ai-messages{
+  height:420px;overflow-y:auto;padding:18px;display:flex;flex-direction:column;gap:12px;
+  background:linear-gradient(180deg,#fbfaf6,#f5f2ea);
+}
+.ai-msg{max-width:82%;padding:11px 15px;border-radius:16px;font-size:14px;line-height:1.65;animation:rise .3s ease both;white-space:pre-wrap;}
+.ai-msg.bot{
+  background:var(--card);border:1px solid var(--line);border-bottom-right-radius:4px;
+  box-shadow:0 2px 8px rgba(15,47,71,.06);align-self:flex-start;
+}
+.ai-msg.user{
+  background:var(--navy);color:#fff;border-bottom-left-radius:4px;align-self:flex-end;
+}
+.ai-msg.bot .ai-label{font-size:11px;font-weight:900;color:var(--teal);display:block;margin-bottom:3px;}
+.ai-typing{display:inline-flex;gap:4px;padding:12px 16px;}
+.ai-typing span{
+  width:7px;height:7px;border-radius:50%;background:var(--muted);animation:dots 1.2s infinite;
+}
+.ai-typing span:nth-child(2){animation-delay:.2s;}
+.ai-typing span:nth-child(3){animation-delay:.4s;}
+.ai-suggestions{display:flex;gap:8px;flex-wrap:wrap;padding:10px 16px;border-top:1px solid var(--line);background:#fff;}
+.ai-suggestions button{
+  font-family:inherit;font-size:12px;font-weight:700;color:var(--navy);
+  background:var(--paper);border:1px solid var(--line);border-radius:20px;
+  padding:6px 13px;cursor:pointer;transition:all .15s;
+}
+.ai-suggestions button:hover{background:var(--gold-soft);border-color:var(--gold);}
+.ai-input-row{display:flex;gap:8px;padding:12px 16px;background:#fff;border-top:1px solid var(--line);}
+.ai-input-row input{
+  flex:1;padding:11px 14px;border-radius:12px;border:1.5px solid var(--line);
+  font-family:inherit;font-size:14px;
+}
+.ai-input-row input:focus{outline:none;border-color:var(--gold);}
+.ai-fallback-note{
+  margin:0 16px 12px;background:#efe9f9;border:1px solid #dccdf2;color:#6b46c1;
+  border-radius:10px;padding:8px 12px;font-size:12px;
+}
+
+/* ===== مولد الكويز بالذكاء الاصطناعي (لوحة المستر) ===== */
+.ai-quiz-heading{color:var(--navy);margin:18px 0 10px;font-size:14.5px;}
+.ai-quiz-box{
+  background:linear-gradient(135deg,#fbf7ec,#f7f0dd);
+  border:1.5px dashed var(--gold);border-radius:var(--radius);
+  padding:16px;
+}
+.ai-quiz-box .btn.gold{margin-top:4px;}
+.gen-status-ok{color:var(--ok);font-weight:700;}
+.gen-status-err{color:var(--danger);font-weight:700;}
+@keyframes spin{to{transform:rotate(360deg);}}
+.spinner-mini{
+  display:inline-block;width:14px;height:14px;border-radius:50%;
+  border:2px solid #e2ddca;border-top-color:var(--gold);
+  animation:spin .7s linear infinite;vertical-align:-2px;margin-left:6px;
+}
 
 /* ===== المنتدى ===== */
 .forum-head{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;}
@@ -247,12 +376,14 @@ tr:hover td{background:#fbfaf6;}
 .q-result-ok{color:var(--ok);font-weight:800;}
 .q-result-no{color:var(--danger);font-weight:800;}
 .score-hero{
-  background:linear-gradient(120deg,var(--navy),#14405e);color:#fff;border-radius:18px;
+  background:var(--grad-navy);color:#fff;border-radius:18px;
   padding:26px;text-align:center;margin-bottom:18px;
 }
 .score-hero .big{font-size:44px;font-weight:900;color:var(--gold);}
-.progress-track{background:#e9e4d5;border-radius:20px;height:8px;overflow:hidden;margin:8px 0 4px;}
-.progress-fill{background:linear-gradient(90deg,var(--gold),#b9822a);height:100%;border-radius:20px;transition:width .3s;}
+.score-hero .earned{display:inline-block;background:rgba(217,164,65,.18);border:1px solid rgba(217,164,65,.5);
+  color:var(--gold-soft);border-radius:20px;padding:5px 16px;font-weight:800;margin-top:10px;font-size:13px;}
+.progress-track.in-card{margin:8px 0 4px;}
+.progress-fill{background:var(--grad-gold);height:100%;border-radius:20px;transition:width .3s;}
 
 /* ===== لوحة المستر ===== */
 .teacher-section{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);
@@ -278,10 +409,19 @@ tr:hover td{background:#fbfaf6;}
 }
 .present{color:var(--ok);font-weight:800;}
 .absent{color:var(--danger);font-weight:800;}
+.pending-dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--gold);margin-left:6px;animation:dots 1.4s infinite;}
 
 .app-footer{
   text-align:center;color:var(--muted);font-size:12px;padding:18px;
   border-top:1px solid var(--line);display:flex;justify-content:center;gap:14px;align-items:center;
+}
+
+/* ===== توست ===== */
+.toast{
+  position:fixed;bottom:18px;left:50%;transform:translateX(-50%);
+  z-index:999;background:var(--navy);color:var(--gold-soft);
+  padding:11px 22px;border-radius:24px;font-size:13px;font-weight:700;
+  box-shadow:0 8px 24px rgba(10,34,51,.35);animation:pop .3s ease both;max-width:90vw;
 }
 
 @media (max-width:860px){
@@ -291,4 +431,7 @@ tr:hover td{background:#fbfaf6;}
   .grid-2,.grid-3{grid-template-columns:1fr;}
   .tabs{top:66px;}
   .welcome-card{flex-direction:column;align-items:flex-start;}
+  .ai-messages{height:340px;}
+  .podium{gap:8px;}
+  .podium .podium-slot{max-width:110px;}
 }
