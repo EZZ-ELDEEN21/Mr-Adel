@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>مستر عادل عزت | منصة اللغة الإنجليزية</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎓</text></svg>">
+<title>مستر أحمد سعد | علوم متكاملة وفيزياء</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔬</text></svg>">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800;900&family=Amiri:ital@0;1&display=swap" rel="stylesheet">
@@ -16,25 +16,25 @@
 <section id="loginView" class="view">
   <div class="login-wrap">
     <div class="login-hero">
-      <div class="hero-crest">🎓</div>
-      <h1>مستر عادل عزت</h1>
-      <p class="hero-sub">منصة اللغة الإنجليزية — شرح، امتحانات، منتدى، ونتايجك كلها في مكان واحد</p>
+      <div class="hero-crest">🔬</div>
+      <h1>مستر أحمد سعد</h1>
+      <p class="hero-sub">علوم متكاملة • فيزياء بكالوريا • فيزياء ثانوية عامة — شرح، امتحانات، منتدى، ونتايجك كلها في مكان واحد</p>
       <ul class="hero-points">
-        <li>شرح مفصل لكل درس ومحاضرات مسجلة</li>
+        <li>شرح مفصل لكل درس وفيديوهات محمية جوه المنصة</li>
         <li>امتحانات وكويزات بتصحيح آلي فوري</li>
         <li>سجل حضورك ودرجاتك أولاً بأول</li>
-        <li>منتدى للطلاب تسأل وتشارك فيه براحتك</li>
+        <li>مساعد ذكي بيجاوب على أسئلتك في العلوم والفيزياء</li>
       </ul>
-      <p class="hero-note">ولي الأمر كمان يقدر يتابع ابنه بنفس الكود من موبايله في أي وقت.</p>
+      <p class="hero-note">حسابك بيتقفل على جهازك شخصياً 🔒 — وجلستك بتفضل مفتوحة حتى بعد ما تقفل الصفحة.</p>
     </div>
 
     <div class="login-card">
-      <h2 id="loginTitle">أهلاً بيك في منصة مستر عادل</h2>
-      <p class="login-hint">اكتب الكود اللي مستر عادل حددهولك، وهنفتحلك كورس فصلك الدراسي.</p>
+      <h2 id="loginTitle">أهلاً بيك في منصة مستر أحمد سعد</h2>
+      <p class="login-hint">اكتب الكود الرقمي اللي مستر أحمد حددهولك (أرقام بس)، وهنفتحلك كورس صفك.</p>
 
       <div class="field">
         <label for="accessCodeInput">كود الدخول</label>
-        <input type="text" id="accessCodeInput" placeholder="مثال: ADEL-3A-012" autocomplete="off" autocapitalize="characters" spellcheck="false">
+        <input type="text" id="accessCodeInput" placeholder="مثال: 123456" inputmode="numeric" autocomplete="off" spellcheck="false">
       </div>
 
       <button id="loginBtn" class="btn primary block">دخول الكورس</button>
@@ -51,10 +51,10 @@
 <section id="studentView" class="view hidden">
   <header class="app-header">
     <div class="brand">
-      <span class="brand-icon">🎓</span>
+      <span class="brand-icon">🔬</span>
       <div>
-        <div class="brand-name">مستر عادل عزت</div>
-        <div class="brand-sub">منصة اللغة الإنجليزية</div>
+        <div class="brand-name">مستر أحمد سعد</div>
+        <div class="brand-sub">علوم متكاملة وفيزياء</div>
       </div>
     </div>
     <div class="header-user">
@@ -104,7 +104,7 @@
     <div id="tab-lessons" class="tab-panel hidden">
       <div class="panel-head">
         <h3 class="section-title">الشرح والمحاضرات</h3>
-        <p class="muted">اضغط على أي درس لفتحه، والفيديوهات هتتفتح في المشغل جوه المنصة.</p>
+        <p class="muted">اضغط على أي درس لفتحه — الفيديوهات بتتفتح بمشغّل محمي جوه المنصة (مش يوتيوب) وممنوع تنزيلها.</p>
       </div>
       <div id="lessonsList" class="cards-grid"></div>
       <div id="lessonViewer" class="hidden"></div>
@@ -112,7 +112,6 @@
     </div>
     <!-- الامتحانات -->
     <div id="tab-quizzes" class="tab-panel hidden">
-      <div id="sgHost" class="hidden"></div>
       <div id="quizListWrap">
         <div class="panel-head">
           <h3 class="section-title">الامتحانات والكويزات</h3>
@@ -149,7 +148,7 @@
     <div id="tab-leaderboard" class="tab-panel hidden">
       <div class="panel-head">
         <h3 class="section-title">🏆 لوحة الشرف</h3>
-        <p class="muted">اجمع النقط من الحلول الصحيحة والحضور والمشاركة في المنتدى — وتقدر تستبدلها بمكافآت من مستر عادل!</p>
+        <p class="muted">اجمع النقط من الحلول الصحيحة والحضور والمشاركة في المنتدى — وتقدر تستبدلها بمكافآت من مستر أحمد!</p>
       </div>
       <div id="leaderboardPodium" class="podium"></div>
       <div id="leaderboardTable" class="table-wrap"></div>
@@ -166,7 +165,7 @@
         <div id="aiMessages" class="ai-messages"></div>
         <div class="ai-suggestions" id="aiSuggestions"></div>
         <div class="ai-input-row">
-          <input type="text" id="aiInput" placeholder="اسأل أي سؤال في الإنجليزي — قواعد، مفردات، ترجمة...">
+          <input type="text" id="aiInput" placeholder="اسأل أي سؤال في العلوم أو الفيزياء — من منهجك أو كتب خارجية...">
           <button id="aiSendBtn" class="btn primary">إرسال</button>
         </div>
       </div>
@@ -186,7 +185,7 @@
   </main>
 
   <footer class="app-footer">
-    <span>مستر عادل عزت © <span id="yearNow"></span> — منصة خاصة بطلابه</span>
+    <span>مستر أحمد سعد © <span id="yearNow"></span> — منصة خاصة بطلابه</span>
     <button id="openTeacherFromStudent" class="btn tiny ghost">لوحة المستر</button>
   </footer>
 </section>
@@ -195,9 +194,9 @@
 <section id="teacherView" class="view hidden">
   <header class="app-header">
     <div class="brand">
-      <span class="brand-icon">🎓</span>
+      <span class="brand-icon">🔬</span>
       <div>
-        <div class="brand-name">مستر عادل عزت</div>
+        <div class="brand-name">مستر أحمد سعد</div>
         <div class="brand-sub">لوحة التحكم</div>
         <div class="brand-sub" id="teacherDbMode"></div>
       </div>
@@ -210,7 +209,7 @@
   <div id="teacherGate" class="container-narrow">
     <div class="login-card card">
       <h2>لوحة المستر</h2>
-      <p class="muted">الصفحة دي لمستر عادل بس — اكتب كلمة سر اللوحة.</p>
+      <p class="muted">الصفحة دي لمستر أحمد سعد بس — اكتب كلمة سر اللوحة.</p>
       <div class="field">
         <label for="teacherPass">كلمة سر اللوحة</label>
         <input type="password" id="teacherPass" placeholder="كلمة سر اللوحة" autocomplete="current-password">
@@ -223,6 +222,6 @@
   <div id="teacherContainer" class="container-narrow hidden"></div>
 </section>
 
-<script type="module" src="app.js?v=7"></script>
+<script type="module" src="app.js?v=8"></script>
 </body>
 </html>

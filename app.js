@@ -1,13 +1,17 @@
 /* ============================================================
-   منصة مستر عادل عزت — منطق التطبيق
-   الدخول بالأكواد، الشروحات، الامتحانات، المنتدى، ولوحة المستر
+   منصة مستر أحمد سعد — العلوم المتكاملة والفيزياء
+   الدخول بالأكواد الرقمية، الشروحات المحمية، الامتحانات،
+   المنتدى، ولوحة المستر — مع قفل الحساب على جهاز واحد
    ============================================================ */
 import { initializeApp } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-app.js";
 import {
   getFirestore, collection, doc, getDoc, getDocs, setDoc, deleteDoc, onSnapshot
 } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-firestore.js";
+import {
+  getStorage, ref, uploadBytesResumable, getDownloadURL
+} from "https://www.gstatic.com/firebasejs/12.16.0/firebase-storage.js";
 
-/* ---------- الاتصال بقاعدة البيانات ---------- */
+/* ---------- الاتصال بقاعدة البيانات والتخزين ---------- */
 const firebaseConfig = {
   apiKey: "AIzaSyClXTtircqJeKJkRTM7pBU5yexiAIld-98",
   authDomain: "clinic-nour.firebaseapp.com",
@@ -22,7 +26,7 @@ let cloudBlocked = false;    // قواعد Firestore مش منشورة (permissi
 let bootSyncDone = false;    // خلصت المزامنة الأولى
 const hydratedCols = new Set(); // المجموعات اللي اتحمّلت من السحابة (تشترط قبل أي كتابة)
 let app, firestoreDb;
-// ==== البنية الجديدة: مجموعة لكل كيان (تزامن صحيح بين الأجهزة بدون last-write-wins) ====
+// ==== البنية: مجموعة لكل كيان (تزامن صحيح بين الأجهزة بدون last-write-wins) ====
 const ENTITY_SORTS = {
   students: null, attendance: "date", quizzes: "date", submissions: "submittedAt",
   lessons: "date", forum: "createdAt", points: "at", rewards: null, redemptions: "at"
@@ -39,10 +43,13 @@ try {
 } catch (e) {
   cloudAvailable = false;
 }
+// التخزين منفصل — لو مش مفعّل ميسقطش قاعدة البيانات معاه
+let storage;
+try { storage = getStorage(app); } catch (e) { storage = null; }
 
 const DEFAULT_DB = {
   students: [
-    { code: "ADEL-3A-001", name: "طالب تجريبي", grade: "3A", phone: "" }
+    { code: "100001", name: "طالب تجريبي", grade: "1Sec", phone: "" }
   ],
   attendance: [],
   quizzes: [],
@@ -50,11 +57,11 @@ const DEFAULT_DB = {
   lessons: [
     {
       id: "lesson_demo_1",
-      title: "Unit 1: Present Perfect",
-      desc: "شرح زمن المضارع التام مع أمثلة وتدريبات.",
+      title: "الحركة التوافقية البسيطة — مقدمة",
+      desc: "مقدمة للحركة الاهتزازية والبندول مع أمثلة من الحياة.",
       date: "2026-09-20",
       videos: [],
-      body: "في الدرس ده هنشرح Present Perfect:\n- التكوين: have / has + V3\n- الاستخدامات: حدوث حاجة في الماضي ولسه مفعولها موجود، تجارب الحياة، ونتيجة مرئية دلوقتي.\n- كلمات دالة: just, already, yet, ever, never, since, for."
+      body: "في الدرس ده هنشرح الحركة التوافقية البسيطة:\n- الحركة الاهتزازية: حركة متكررة حول نقطة اتزان.\n- البندول البسيط: زقزة زمنها T = 2π√(L/g).\n- البندول الزنبركي: T = 2π√(m/k).\n- التطبيقات: الساعات، الموجات الصوتية، والاهتزازات الميكانيكية."
     }
   ],
   forum: [],
@@ -65,11 +72,11 @@ const DEFAULT_DB = {
     { id: "rw_3", name: "اختيار لعبة للحصة", cost: 200, emoji: "🎮" }
   ],
   redemptions: [],
-  settings: { teacherPass: "adel2026", whatsapp: "", banner: "", aiProvider: "groq", aiKey: "", aiModel: "llama-3.3-70b-versatile", allowStudentQuiz: true, studentDailyLimit: 5 }
+  settings: { teacherPass: "adel2026", whatsapp: "", banner: "", aiProvider: "groq", aiKey: "", aiModel: "llama-3.3-70b-versatile" }
 };
 
 let db = JSON.parse(JSON.stringify(DEFAULT_DB));
-let me = null;          // الطالب الحالي {code,name,grade,phone}
+let me = null;          // الطالب الحالي {code,name,grade,phone,...}
 let teacherUnlocked = false;
 let currentTab = "home";
 let currentQuiz = null; // {quiz, answers}
@@ -144,13 +151,13 @@ function markAllSaved(name) {
   }
 }
 async function cloudWriteList(name) {
-  const ref = colRef(name);
+  const colR = colRef(name);
   for (const item of db[name]) {
     const id = String(item.id || item.code || uid(name.slice(0, 2)));
     const json = JSON.stringify(item);
     const k = name + "/" + id;
     if (savedSnapshot.get(k) === json) continue; // متغيرش → متكتبش
-    await setDoc(doc(ref, id), item);
+    await setDoc(doc(colR, id), item);
     savedSnapshot.set(k, json);
   }
 }
@@ -213,7 +220,6 @@ async function loadDB() {
   // 1) ابدأ دائماً بالحفظ المحلي للجهاز — عشان الـ Refresh ميمسحش أي حاجة
   // 2) السحابة فوقه (أحدث) لو متاحة — السحابة هي مصدر الحقيقة بعد التحميل
   // 3) لو السحابة فيها بيانات والحفظ المحلي فيه حاجة مش موجودة فيها → ارفعها
-  //    (ده اللي بيمنع ضياع بيانات الطلاب لما المستر ينشر القواعد بعد فترة استخدام محلي)
   try {
     const raw = localStorage.getItem("adel_db");
     if (raw) {
@@ -343,32 +349,113 @@ function show(view) {
   window.scrollTo(0, 0);
 }
 
+/* ============================================================
+   الجلسة الدائمة + قفل الحساب على جهاز واحد
+   - الكود بيتحفظ في localStorage (مش sessionStorage) → الريستارت
+     أو قفل التاب مابيسألش الكود تاني.
+   - أول مرة الطالب يدخل بالكود من جهاز، الجهاز بيتسجل مع الطالب
+     (lockedDevice) وأي جهاز تاني بيتمنع نهائياً لحد ما المستر
+     يفتح القفل من لوحة التحكم.
+   ============================================================ */
+const SESSION_KEY = "as_me_v2";
+const DEVICE_KEY = "as_device_id";
+const LOGIN_GUARD_KEY = "as_login_guard";
+
+function simpleHash(str) {
+  let h = 5381;
+  for (let i = 0; i < str.length; i++) { h = ((h << 5) + h + str.charCodeAt(i)) >>> 0; }
+  return h.toString(16);
+}
+function deviceKey() {
+  let id = null;
+  try { id = localStorage.getItem(DEVICE_KEY); } catch (e) {}
+  if (!id) {
+    id = Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 10);
+    try { localStorage.setItem(DEVICE_KEY, id); } catch (e) {}
+  }
+  return simpleHash(id + "|" + (navigator.userAgent || "") + "|" + (screen.width || 0) + "x" + (screen.height || 0));
+}
+function deviceLabel() {
+  return /Android|iPhone|iPad|Mobile/i.test(navigator.userAgent || "") ? "موبايل" : "كمبيوتر";
+}
+function saveSession(st) {
+  try { localStorage.setItem(SESSION_KEY, JSON.stringify({ code: st.code, at: Date.now() })); } catch (e) {}
+}
+function clearSession() {
+  try { localStorage.removeItem(SESSION_KEY); } catch (e) {}
+}
+
+function loginGuardCheck() {
+  let g = null;
+  try { g = JSON.parse(localStorage.getItem(LOGIN_GUARD_KEY) || "null"); } catch (e) {}
+  const now = Date.now();
+  if (g && g.count >= 5 && now - g.first < 60000) {
+    return { ok: false, wait: Math.ceil((60000 - (now - g.first)) / 1000) };
+  }
+  return { ok: true };
+}
+function loginGuardFail() {
+  let g = null;
+  try { g = JSON.parse(localStorage.getItem(LOGIN_GUARD_KEY) || "null"); } catch (e) {}
+  const now = Date.now();
+  if (!g || now - g.first >= 60000) g = { count: 0, first: now };
+  g.count++;
+  try { localStorage.setItem(LOGIN_GUARD_KEY, JSON.stringify(g)); } catch (e) {}
+}
+function loginGuardReset() {
+  try { localStorage.removeItem(LOGIN_GUARD_KEY); } catch (e) {}
+}
+
 /* ---------- شاشة الدخول ---------- */
 async function doLogin() {
-  const raw = $("accessCodeInput").value.trim().toUpperCase();
+  const raw = $("accessCodeInput").value.trim();
   const err = $("loginError");
   err.style.display = "none";
   if (!raw) { err.textContent = "اكتب كود الدخول الأول."; err.style.display = "block"; return; }
 
-  const st = db.students.find((s) => String(s.code).trim().toUpperCase() === raw);
-  if (!st) {
-    err.textContent = "الكود ده مش موجود. اتأكد منه أو كلم مستر عادل.";
+  const guard = loginGuardCheck();
+  if (!guard.ok) {
+    err.textContent = "محاولات كتير غلط — استنى " + guard.wait + " ثانية وجرب تاني 🔒";
     err.style.display = "block";
     return;
   }
+
+  const st = db.students.find((s) => String(s.code).trim().toUpperCase() === raw.toUpperCase());
+  if (!st) {
+    loginGuardFail();
+    err.textContent = "الكود ده مش موجود. اتأكد منه أو كلم مستر أحمد سعد.";
+    err.style.display = "block";
+    return;
+  }
+
+  // قفل الجهاز: الحساب بيتقفل على أول جهاز يدخل بيه
+  const dk = deviceKey();
+  if (st.lockedDevice && st.lockedDevice !== dk) {
+    err.innerHTML = "🔒 الحساب ده مقفول على جهاز تاني — مينفعش يتفتح من غير إذن.<br>لو ده جهازك الجديد، كلم مستر أحمد سعد يفتحلك القفل من لوحة التحكم.";
+    err.style.display = "block";
+    return;
+  }
+  if (!st.lockedDevice) {
+    st.lockedDevice = dk;
+    await saveDB(["students"]);
+  }
+
+  loginGuardReset();
   me = st;
-  try { sessionStorage.setItem("adel_me", JSON.stringify(st)); } catch {}
+  saveSession(st);
   openStudent();
 }
 
 function resumeSession() {
   try {
-    const raw = sessionStorage.getItem("adel_me");
+    const raw = localStorage.getItem(SESSION_KEY);
     if (!raw) return false;
-    const st = JSON.parse(raw);
-    if (!st || !st.code) return false;
-    const found = db.students.find((s) => String(s.code).trim().toUpperCase() === String(st.code).trim().toUpperCase());
-    if (!found) return false;
+    const sess = JSON.parse(raw);
+    if (!sess || !sess.code) return false;
+    const found = db.students.find((s) => String(s.code).trim().toUpperCase() === String(sess.code).trim().toUpperCase());
+    if (!found) { clearSession(); return false; }
+    // لو الجلسة اتحاولت تتفتح من جهاز غير الجهاز المقفول → امنعها فوراً
+    if (found.lockedDevice && found.lockedDevice !== deviceKey()) { clearSession(); return false; }
     me = found;
     openStudent();
     return true;
@@ -377,7 +464,7 @@ function resumeSession() {
 
 function studentLogout() {
   me = null;
-  try { sessionStorage.removeItem("adel_me"); } catch {}
+  clearSession();
   show("loginView");
   $("accessCodeInput").value = "";
 }
@@ -387,9 +474,9 @@ function studentLogout() {
    ============================================================ */
 function openStudent() {
   show("studentView");
-  $("studentBadge").textContent = me.name + " — " + me.grade;
+  $("studentBadge").textContent = me.name + " — " + (GRADE_SHORT[me.grade] || me.grade);
   $("welcomeName").textContent = "أهلاً يا " + me.name.split(" ")[0] + " 👋";
-  $("welcomeMeta").textContent = "فصل " + me.grade + " • كودك: " + me.code;
+  $("welcomeMeta").textContent = (GRADE_LABELS[me.grade] || me.grade) + " • كودك: " + me.code + " • جهازك: " + deviceLabel() + " 🔒";
   $("streakBox").innerHTML = attendanceStreakHTML();
   renderBanner();
   renderHeaderPoints();
@@ -450,7 +537,7 @@ function attendanceStreakHTML() {
 }
 
 function renderStudentStats() {
-  const subs = mySubmissions().filter((s) => !s.training); // التدريب الذاتي مش في المتوسط الرسمي
+  const subs = mySubmissions().filter((s) => !s.training);
   const attended = myAttendance().filter((a) => a.present).length;
   const avg = subs.length
     ? Math.round(subs.reduce((s, x) => s + (x.score / Math.max(1, x.max)) * 100, 0) / subs.length)
@@ -492,7 +579,11 @@ function renderHomeForum() {
   ).join("") || '<div class="muted">المنتدى لسه هادي — كون أول واحد يكتب موضوع!</div>';
 }
 
-/* ---------- الشروحات ---------- */
+/* ============================================================
+   الشروحات + المشغل المحمي للفيديوهات
+   الفيديوهات المرفوعة كملفات بتتعرض بمشغل خاص:
+   منع التنزيل + علامة مائية باسم الطالب + إيقاف عند مغادرة النافذة
+   ============================================================ */
 function renderLessons() {
   $("lessonViewer").classList.add("hidden");
   $("lessonViewer").innerHTML = "";
@@ -518,14 +609,19 @@ function openLesson(id) {
     '<div class="chips" style="margin-bottom:10px;"><span class="chip">' + esc(l.date || "") + '</span></div>' +
     '<div style="white-space:pre-wrap;font-size:14.5px;">' + esc(l.body || "لا يوجد شرح مكتوب لهذا الدرس.") + '</div>' +
     (l.videos && l.videos.length ?
-      '<h3 class="section-title">المحاضرات المرئية</h3><div class="chips">' +
+      '<h3 class="section-title">🎬 المحاضرات المرئية (مشغّل محمي)</h3><div class="chips">' +
       l.videos.map((vid, i) =>
-        '<button class="btn gold" data-video="' + esc(vid) + '">▶ الفيديو ' + (i + 1) + '</button>'
+        '<button class="btn gold" data-video="' + i + '">▶ ' +
+        (typeof vid === "string" ? "الفيديو " + (i + 1) : esc(vid.name || "الفيديو " + (i + 1))) + '</button>'
       ).join(" ") + '</div>' : '') +
     '</div>';
   $("backToLessons").addEventListener("click", renderLessons);
   v.querySelectorAll("[data-video]").forEach((b) => {
-    b.addEventListener("click", () => openVideo(b.dataset.video, l.title));
+    b.addEventListener("click", () => {
+      const vid = l.videos[Number(b.dataset.video)];
+      if (typeof vid === "string") openVideo(vid, l.title);
+      else openProtectedVideo(l, Number(b.dataset.video));
+    });
   });
 }
 
@@ -534,6 +630,7 @@ function youtubeId(input) {
   return m ? m[1] : String(input).trim();
 }
 function openVideo(raw, title) {
+  // روابط يوتيوب القديمة (للتوافق مع الدروس القديمة بس)
   const id = youtubeId(raw);
   const modal = $("videoModal");
   modal.classList.remove("hidden");
@@ -545,6 +642,34 @@ function openVideo(raw, title) {
     '</div>';
   $("closeVideo").addEventListener("click", closeVideo);
 }
+
+function openProtectedVideo(lesson, idx) {
+  const vid = lesson.videos[idx];
+  if (!vid || !vid.url) { toast("الفيديو مش متاح حالياً — كلم المستر."); return; }
+  const wm = me ? (me.name + " • كود " + me.code + " • " + todayStr()) : "نسخة الطالب";
+  const modal = $("videoModal");
+  modal.classList.remove("hidden");
+  modal.innerHTML =
+    '<div class="modal-inner">' +
+    '<div class="modal-bar"><b>🎬 ' + esc(lesson.title) + '</b>' +
+    '<button class="btn tiny" id="closeVideo">إغلاق ✕</button></div>' +
+    '<div class="video-wrap" id="videoWrap">' +
+    '<div class="video-watermark" aria-hidden="true">' +
+    Array.from({ length: 6 }, () => '<span>' + esc(wm) + '</span>').join("") +
+    '</div>' +
+    '<video id="protectedVideo" src="' + esc(vid.url) + '" controls preload="metadata" playsinline ' +
+    'controlslist="nodownload noplaybackrate noremoteplayback" disablepictureinpicture></video>' +
+    '<div class="video-guard hidden" id="videoGuard"><div>🔒 الفيديو اتوقف مؤقتاً' +
+    '<span>ارجع للنافذة دي عشان تكمل مشاهدة</span></div></div>' +
+    '</div>' +
+    '<div class="muted" style="margin-top:8px;">🔒 الفيديو ملك خاص لمنصة مستر أحمد سعد — ممنوع التسجيل أو النشر أو التنزيل، ومسجّل باسمك: ' + esc(wm) + '</div>' +
+    '</div>';
+  $("closeVideo").addEventListener("click", closeVideo);
+  const v = $("protectedVideo");
+  v.addEventListener("contextmenu", (e) => e.preventDefault());
+  const guard = $("videoGuard");
+  guard.addEventListener("click", () => guard.classList.add("hidden"));
+}
 function closeVideo() {
   const modal = $("videoModal");
   modal.classList.add("hidden");
@@ -552,129 +677,21 @@ function closeVideo() {
 }
 
 /* ---------- الامتحانات ---------- */
-function studentGenTodayCount() {
-  if (!me) return 0;
-  const today = todayStr();
-  return db.quizzes.filter((q) => q.createdBy === me.code && q.date === today).length;
-}
-function studentCanGenerate() {
-  if (!db.settings.allowStudentQuiz) return { ok: false, msg: "مولد الكويزات مقفول من مستر عادل حالياً." };
-  if (!aiAvailable()) return { ok: false, msg: "الذكاء الاصطناعي مش مفعّل بعد — كلم مستر عادل يضيف المفتاح من لوحة التحكم." };
-  const used = studentGenTodayCount();
-  const limit = Number(db.settings.studentDailyLimit) || 5;
-  if (used >= limit) return { ok: false, msg: "خلصت حصتك اليومية (" + limit + " كويزات) — جرب بكرة! 💪" };
-  return { ok: true, used, limit };
-}
-
-function studentGenHTML() {
-  const chk = studentCanGenerate();
-  const cur = CURRICULUM[studentGradeKey()];
-  if (!chk.ok) {
-    return '<div class="ai-quiz-box"><b>🎯 اعمل كويز بنفسك بالذكاء الاصطناعي</b>' +
-      '<div class="muted" style="margin-top:6px;">' + esc(chk.msg) + '</div></div>';
-  }
-  if (!cur) {
-    return '<div class="ai-quiz-box"><b>🎯 اعمل كويز بنفسك بالذكاء الاصطناعي</b>' +
-      '<div class="muted" style="margin-top:6px;">فصلك مش من المناهج المتاحة — كلم مستر عادل يظبط فصلك في لوحة التحكم.</div></div>';
-  }
-  return '<div class="ai-quiz-box">' +
-    '<b>🎯 اعمل كويز بنفسك بالذكاء الاصطناعي!</b>' +
-    '<div class="muted" style="margin-bottom:10px;">اختار الوحدة من كتاب الوزارة وهيتولدلك كويز فوري — حصتك النهارده: ' +
-    '<b>' + chk.used + '/' + chk.limit + '</b></div>' +
-    '<div class="grid-3">' +
-    (cur
-      ? '<div class="field"><label>الترم</label><select id="sgTerm"><option value="0"' + (currentTermIndex() === 0 ? " selected" : "") + '>' + esc(cur.terms[0].label) + '</option><option value="1"' + (currentTermIndex() === 1 ? " selected" : "") + '>' + esc(cur.terms[1].label) + '</option></select></div>'
-      : '') +
-    '<div class="field"><label>الوحدة</label><select id="sgUnit">' + (cur ? cur.terms[currentTermIndex()].units.map((u) => '<option>' + esc(u) + '</option>').join("") : "") + '</select></div>' +
-    '<div class="field"><label>عدد الأسئلة</label><select id="sgCount"><option>5</option><option selected>8</option><option>10</option></select></div>' +
-    '</div>' +
-    '<button class="btn gold block" id="sgGenerateBtn">✨ توليد الكويز والتدريب عليه فوراً</button>' +
-    '<div id="sgStatus" style="margin-top:8px;"></div>' +
-    '</div>';
-}
-function studentGradeKey() {
-  // هات مفتاح الصف الأقرب لفصل الطالب — الصف من أول حرف/رقم في grade
-  const g = String(me.grade || "").trim().toUpperCase();
-  const m = g.match(/^(1|2|3|4|5|6)/);
-  const num = m ? m[1] : "3";
-  const isPrep = /Prep|إعداد|اعداد|إعدادي|اعدادي|P5|P6/.test(g) || (num === "1" && /1.*P/i.test(g));
-  return num + " " + (isPrep ? "Prep" : "Prim");
-}
-
-function bindStudentGen() {
-  const termSel = $("sgTerm");
-  const unitSel = $("sgUnit");
-  if (termSel && unitSel) {
-    termSel.addEventListener("change", () => {
-      const c = CURRICULUM[studentGradeKey()];
-      const t = c.terms[Number(termSel.value)] || c.terms[0];
-      unitSel.innerHTML = t.units.map((u) => '<option>' + esc(u) + '</option>').join("");
-    });
-  }
-  const btn = $("sgGenerateBtn");
-  if (!btn) return;
-  btn.addEventListener("click", async () => {
-    const status = $("sgStatus");
-    const chk = studentCanGenerate();
-    if (!chk.ok) { status.innerHTML = '<span class="gen-status-err">✗ ' + esc(chk.msg) + '</span>'; return; }
-    const grade = studentGradeKey();
-    const c = CURRICULUM[grade];
-    const termIdx = termSel ? Number(termSel.value || 0) : currentTermIndex();
-    const unit = $("sgUnit").value;
-    const count = Number($("sgCount").value);
-    btn.disabled = true;
-    status.innerHTML = '<span class="muted">⏳ جاري توليد كويز ' + esc(unit) + ' ...<span class="spinner-mini"></span></span>';
-    try {
-      const questions = await aiGenerateQuizQuestions(grade, termIdx, unit, count);
-      const quiz = {
-        id: uid("qz"),
-        title: "🎯 " + unit + " — كويز تدريبي لـ " + me.name.split(" ")[0],
-        desc: "اتولد بالذكاء الاصطناعي • " + unit + " • " + c.book + " • " + c.terms[termIdx].label,
-        date: todayStr(),
-        questions,
-        generatedBy: "student-ai",
-        createdBy: me.code,
-        createdByName: me.name,
-        gradeTag: grade,
-        termIdx,
-        training: true
-      };
-      db.quizzes.push(quiz);
-      await saveDB(["quizzes"]);
-      status.innerHTML = '<span class="gen-status-ok">✓ جهز كويزك! مستر عادل هيشوفه برضه.</span>';
-      openQuiz(quiz.id);
-      renderQuizList();
-    } catch (e) {
-      status.innerHTML = '<span class="gen-status-err">✗ ' + esc((e && e.message) || "خطأ") + '</span>';
-    }
-    btn.disabled = false;
-  });
-}
-
 function renderQuizList() {
   $("quizTaking").classList.add("hidden");
   $("quizTaking").innerHTML = "";
   $("quizListWrap").classList.remove("hidden");
-  // صندوق مولّد كويز الطالب بالذكاء الاصطناعي — فوق قائمة الكويزات
-  const host = $("sgHost");
-  if (host) {
-    host.innerHTML = studentGenHTML();
-    host.classList.toggle("hidden", host.innerHTML === "");
-    bindStudentGen();
-  }
   const list = db.quizzes.slice().reverse();
   $("quizList").innerHTML = list.map((q) => {
     const sub = mySubmissions().find((s) => s.quizId === q.id);
     const chip = sub
       ? '<span class="chip green">اتحل: ' + sub.score + '/' + q.questions.length + '</span>'
       : '<span class="chip">' + q.questions.length + ' سؤال</span>';
-    const madeBy = q.generatedBy === "student-ai"
-      ? '<span class="chip purple">🎯 كويز ' + esc(q.createdByName || "طالب") + '</span>' : "";
     return '<div class="quiz-card" data-quiz="' + esc(q.id) + '">' +
       '<div class="lesson-icon">' + (sub ? "✅" : "📝") + '</div>' +
       '<div class="lesson-title">' + esc(q.title) + '</div>' +
       '<div class="lesson-desc">' + esc(q.desc || "") + '</div>' +
-      '<div class="chips">' + chip + madeBy + '<span class="chip gray">' + esc(q.date || "") + '</span></div></div>';
+      '<div class="chips">' + chip + '<span class="chip gray">' + esc(q.date || "") + '</span></div></div>';
   }).join("") || '<div class="muted">مفيش امتحانات لسه — طلّم على مستر يضيف واحدة 😄</div>';
   $("quizList").querySelectorAll("[data-quiz]").forEach((el) => {
     el.addEventListener("click", () => openQuiz(el.dataset.quiz));
@@ -739,7 +756,6 @@ function submitQuiz() {
     training: quiz.training === true
   };
   db.submissions.push(sub);
-  // كويزات التدريب اللي الطالب ولّدها مش بتحسب نقط ولا متوسط درجات رسمي
   const earned = quiz.training ? 0 : score * 2 + (score === quiz.questions.length ? 5 : 0);
   if (earned > 0) awardPoints(me.code, me.name, earned, "كويز: " + quiz.title + " (" + score + "/" + quiz.questions.length + ")");
   saveDB(["submissions", "points"]);
@@ -794,7 +810,7 @@ function renderForum() {
   $("forumList").innerHTML = list.map((t) =>
     '<div class="forum-item" data-thread="' + esc(t.id) + '">' +
     '<h4>' + esc(t.title) + '</h4>' +
-    '<div class="forum-meta"><span>👤 ' + esc(t.author) + ' (' + esc(t.grade || "") + ')</span>' +
+    '<div class="forum-meta"><span>👤 ' + esc(t.author) + ' (' + esc(GRADE_SHORT[t.grade] || t.grade || "") + ')</span>' +
     '<span>💬 ' + (t.replies ? t.replies.length : 0) + ' رد</span>' +
     '<span>' + esc(dateTime(t.createdAt)) + '</span></div></div>'
   ).join("") || '<div class="muted">مفيش مواضيع — افتح الموضوع الأول!</div>';
@@ -908,7 +924,7 @@ const RANKS = [
   { name: "مجتهد", min: 50, icon: "📘" },
   { name: "متميز", min: 150, icon: "⭐" },
   { name: "نجم الفصل", min: 300, icon: "🌟" },
-  { name: "أسطورة الإنجليزي", min: 500, icon: "👑" }
+  { name: "أسطورة الأكاديمية", min: 500, icon: "👑" }
 ];
 function rankOf(pts) {
   let r = RANKS[0];
@@ -930,7 +946,7 @@ function renderHeaderPoints() {
   const el = $("studentBadge");
   if (!el || !me) return;
   const pts = pointsOf(me.code);
-  el.innerHTML = esc(me.name + " — " + me.grade) + ' <span class="pts">• ' + pts + ' ⭐</span>';
+  el.innerHTML = esc(me.name + " — " + (GRADE_SHORT[me.grade] || me.grade)) + ' <span class="pts">• ' + pts + ' ⭐</span>';
 }
 function renderPointsBar() {
   const bar = $("pointsBar");
@@ -962,7 +978,7 @@ function renderHomeLeaderboard() {
     ? '<table><tr><th>#</th><th>الطالب</th><th>الرتبة</th><th>النقط</th></tr>' +
       top.map((s, i) => {
         const r = rankOf(s.pts);
-        return '<tr class="rank-' + (i + 1) + '"><td class="rank-cell">' + (i + 1) + '</td><td><b>' + esc(s.name) + '</b> — ' + esc(s.grade) + '</td><td>' + r.icon + " " + esc(r.name) + '</td><td><b>' + s.pts + '</b> ⭐</td></tr>';
+        return '<tr class="rank-' + (i + 1) + '"><td class="rank-cell">' + (i + 1) + '</td><td><b>' + esc(s.name) + '</b> — ' + esc(GRADE_SHORT[s.grade] || s.grade) + '</td><td>' + r.icon + " " + esc(r.name) + '</td><td><b>' + s.pts + '</b> ⭐</td></tr>';
       }).join("") + '</table>'
     : '<div class="muted" style="padding:14px;">لسه مفيش نقط — ابدأ اكسب!</div>';
 }
@@ -984,10 +1000,10 @@ function renderLeaderboard() {
   $("leaderboardPodium").innerHTML = podiumHTML || '<div class="muted">لسه مفيش منافسين!</div>';
 
   $("leaderboardTable").innerHTML = all.length
-    ? '<table><tr><th>#</th><th>الطالب</th><th>الفصل</th><th>الرتبة</th><th>النقط</th></tr>' +
+    ? '<table><tr><th>#</th><th>الطالب</th><th>الصف</th><th>الرتبة</th><th>النقط</th></tr>' +
       all.map((s, i) => {
         const r = rankOf(s.pts);
-        return '<tr class="rank-' + (i + 1) + '"><td class="rank-cell">' + (i + 1) + '</td><td><b>' + esc(s.name) + '</b></td><td>' + esc(s.grade) + '</td><td>' + r.icon + " " + esc(r.name) + '</td><td><b>' + s.pts + '</b> ⭐</td></tr>';
+        return '<tr class="rank-' + (i + 1) + '"><td class="rank-cell">' + (i + 1) + '</td><td><b>' + esc(s.name) + '</b></td><td>' + esc(GRADE_SHORT[s.grade] || s.grade) + '</td><td>' + r.icon + " " + esc(r.name) + '</td><td><b>' + s.pts + '</b> ⭐</td></tr>';
       }).join("") + '</table>'
     : '<div class="muted" style="padding:14px;">لسه مفيش طلاب.</div>';
 
@@ -1023,83 +1039,136 @@ function renderRewards() {
       db.redemptions.push({ id: uid("rd"), rewardId: r.id, rewardName: r.name, code: me.code, name: me.name, at: Date.now() });
       await saveDB(["points", "redemptions"]);
       renderHeaderPoints(); renderPointsBar(); renderLeaderboard();
-      toast("🎁 اتبعت طلبك لمستر عادل — استلم مكافأتك في الحصة!");
+      toast("🎁 اتبعت طلبك لمستر أحمد سعد — استلم مكافأتك في الحصة!");
     });
   });
 }
 
 /* ============================================================
-   بنك المناهج المصرية — المنهج الجديد 2026/2027 من كتاب الوزارة
-   مصدر الوحدات: فهارس كتب الوزارة المعتمدة + كتب المكتبة الرسمية
-   (كل ترم فيه 6 وحدات بالظبط زي الكتاب الرسمي)
+   المناهج — منصة مستر أحمد سعد (3 صفوف فقط)
+   مصدر الوحدات: فهارس كتب الوزارة الرسمية (2026/2027)
    ============================================================ */
 const CURRICULUM = {
-  "1 Prim": { book: "English Primary 1 (منهج 2026)", terms: [
-    { label: "الترم الأول", units: ["Unit 1: Welcome to My School", "Unit 2: The Garden of Colors and Shapes", "Unit 3: I Love My Family", "Unit 4: My Body and My Senses", "Unit 5: On the Farm", "Unit 6: Animals Around Me"] },
-    { label: "الترم الثاني", units: ["Unit 1: My Week", "Unit 2: Feelings", "Unit 3: Seasons", "Unit 4: My House", "Unit 5: Neighborhood", "Unit 6: Story: Two Friends and One Apple"] }
+  "1Sec": { book: "العلوم المتكاملة 1ث — كتاب الوزارة", terms: [
+    { label: "الترم الأول", units: [
+      "الوحدة الأولى (أحياء): تنوع الكائنات الحية والطاقة",
+      "الوحدة الثانية (فيزياء): وصف الحركة والقوة",
+      "الوحدة الثالثة (كيمياء): المواد الكيميائية وخصائصها",
+      "الغلاف الجوي وأول أكسيد الكربون",
+      "مراجعة شاملة — الفصل الدراسي الأول"
+    ] },
+    { label: "الترم الثاني", units: [
+      "الوحدة الأولى: النظام البيئي — السلاسل الغذائية وهرم الطاقة",
+      "الوحدة الثانية: الغلاف الحيوي والعمليات الحيوية",
+      "الوحدة الثالثة: الغلاف الصخري",
+      "مراجعة شاملة — الفصل الدراسي الثاني"
+    ] }
   ] },
-  "2 Prim": { book: "English Primary 2 (منهج 2026)", terms: [
-    { label: "الترم الأول", units: ["Unit 1: Let's Get Started", "Unit 2: Colors, Shapes, and Numbers", "Unit 3: Classroom Actions & Routines", "Unit 4: Everyday Life", "Unit 5: My Home", "Unit 6: Rooms at Home"] },
-    { label: "الترم الثاني", units: ["Unit 1: Our Environment", "Unit 2: At the Store", "Unit 3: Sports", "Unit 4: Transportation", "Unit 5: The Pyramids", "Unit 6: A Day with My Family"] }
+  "2Sec": { book: "الفيزياء 2ث (بكالوريا) — كتاب الوزارة", terms: [
+    { label: "الترم الأول (الجزء الأول)", units: [
+      "الفصل الأول — الميكانيكا: متجهات السرعة وحركة المقذوفات",
+      "الفصل الأول (تابع): عزم القوة واتزان القوى والقدرة والكفاءة",
+      "الفصل الأول (تابع): كمية التحرك والحفظ والحركة الدائرية",
+      "الفصل الأول (تابع): قوانين كبلر والجاذبية الكونية",
+      "الفصل الثاني — الحركة الاهتزازية: التوافقية البسيطة والبندول",
+      "الفصل الثاني (تابع): الموجات الجيبية والتداخل وتأثير دوبلر",
+      "الفصل الثاني (تابع): انكسار الضوء والعدسات وتجربة الشق المزدوج"
+    ] },
+    { label: "الترم الثاني (الجزء الثاني)", units: [
+      "الفصل الأول: الغازات والحرارة",
+      "الفصل الثاني: الكهرباء الساكنة — كولوم والمجال والجهد والمكثف",
+      "الفصل الثالث: التيار الكهربي والدوائر — قانونا كيرشوف",
+      "الفصل الرابع: المغناطيسية والحث الكهرومغناطيسي",
+      "الفصل الخامس: الطبيعة الكمية للضوء والمادة"
+    ] }
   ] },
-  "3 Prim": { book: "English Primary 3 (منهج 2026)", terms: [
-    { label: "الترم الأول", units: ["Unit 1: Let's Learn Together!", "Unit 2: My Family and I", "Unit 3: New Adventures", "Unit 4: Let's Tell Stories!", "Unit 5: Together Is Better", "Unit 6: Dare to Dream"] },
-    { label: "الترم الثاني", units: ["Unit 1: Safety", "Unit 2: Food and Health", "Unit 3: Heroes Around Us", "Unit 4: Living with Technology", "Unit 5: Animals and Habitats", "Unit 6: The Honest Choice"] }
-  ] },
-  "4 Prim": { book: "English Primary 4 (منهج 2026)", terms: [
-    { label: "الترم الأول", units: ["Unit 1: The Five Senses", "Unit 2: My Community", "Unit 3: Animals In Our World", "Unit 4: Egypt My Homeland", "Unit 5: A Day At Work", "Unit 6: The Hundred Dresses"] },
-    { label: "الترم الثاني", units: ["Unit 1: This is Where I Live", "Unit 2: Our World, Our Responsibility", "Unit 3: What's in the Package?", "Unit 4: Let's Celebrate", "Unit 5: Exploring Wonders in Egypt", "Unit 6: The Lost Kite"] }
-  ] },
-  "5 Prim": { book: "English Primary 5 (منهج 2026)", terms: [
-    { label: "الترم الأول", units: ["Unit 1: Food, Nature, and Culture", "Unit 2: My Healthy Body", "Unit 3: When Nature Changes", "Unit 4: My Community", "Unit 5: Our World, Our Resources", "Unit 6: The Talking Earth"] },
-    { label: "الترم الثاني", units: ["Unit 1: Hobbies Make Us Shine!", "Unit 2: At the Doctor's", "Unit 3: Suitcase Stories", "Unit 4: Jobs in The Animal Kingdom", "Unit 5: Our Solar System", "Unit 6: Offline but Happy"] }
-  ] },
-  "6 Prim": { book: "English Primary 6 (منهج 2026)", terms: [
-    { label: "الترم الأول", units: ["Unit 1: Amazing Places in Egypt", "Unit 2: Our Nature", "Unit 3: Community Builders", "Unit 4: Resources Around Us", "Unit 5: Made in Egypt", "Unit 6: The Water Savers"] },
-    { label: "الترم الثاني", units: ["Unit 1: Celebrating Creativity", "Unit 2: Wonderful Inventions", "Unit 3: Hidden Gems of Egypt", "Unit 4: Egypt on The Move", "Unit 5: Safe and Smart Transportation", "Unit 6: Story Time: The Library That Time Forgot"] }
-  ] },
-  "1 Prep": { book: "Hello! Beyond Words 1", terms: [
-    { label: "الترم الأول", units: ["Unit 1: A Great Summer", "Unit 2: My Network", "Unit 3: My Time", "Unit 4: Digital Life", "Unit 5: In Nature", "Unit 6: Food for Thought"] },
-    { label: "الترم الثاني", units: ["Unit 7: Helping Each Other to Learn", "Unit 8: New Life in Old Cities", "Unit 9: Plans with Friends", "Unit 10: The Online Generation", "Unit 11: Clean Transportation", "Unit 12: Sustainable Tourism"] }
-  ] },
-  "2 Prep": { book: "Hello! Beyond Words 2", terms: [
-    { label: "الترم الأول", units: ["Unit 1: Gen Alpha", "Unit 2: My Digital Footprint", "Unit 3: Facing Challenges", "Unit 4: Art and Expression", "Unit 5: Around the World", "Unit 6: Young Innovators"] },
-    { label: "الترم الثاني", units: ["Unit 7: My School Life", "Unit 8: Learn Smart, Learn Easy", "Unit 9: Jobs & Skills", "Unit 10: Storytelling", "Unit 11: Life in the Desert", "Unit 12: Our Incredible Earth"] }
-  ] },
-  "3 Prep": { book: "Hello! Beyond Words 3", terms: [
-    { label: "الترم الأول", units: ["Unit 1: Personal Identity", "Unit 2: Communication with Family and Friends", "Unit 3: Artificial Intelligence", "Unit 4: Screen Time", "Unit 5: Design Thinking", "Unit 6: Why Do We Like Stories?"] },
-    { label: "الترم الثاني", units: ["Unit 7: Sports", "Unit 8: Cultures and Traditions", "Unit 9: Courage and Survival", "Unit 10: Animal Adaptations", "Unit 11: Stories on the Move", "Unit 12: Leadership and Teamwork"] }
+  "3Sec": { book: "الفيزياء 3ث — كتاب الوزارة", terms: [
+    { label: "الترم الأول", units: [
+      "الموجات: الخصائص الموجية والظواهر الموجية",
+      "الموجات الضوئية: التداخل والحيود والاستقطاب",
+      "الموجات الكهرومغناطيسية والطيف الكهرومغناطيسي",
+      "الفيزياء الحديثة: الطبيعة الموجية-الجسيمية وأثر كومبتون",
+      "الذرة: الطيف الذري ومستويات الطاقة",
+      "النواة: مكوناتها والنشاط الإشعاعي"
+    ] },
+    { label: "الترم الثاني", units: [
+      "الإلكترونيات: المواد شبه الموصلة والدايود",
+      "ترانزستور التأثير المجالي ومكبر الصوت",
+      "مراجعة شاملة على امتحان وزارة الترم الثاني"
+    ] }
   ] }
 };
-const GRADE_LABELS = { "1 Prim": "الأول الابتدائي", "2 Prim": "الثاني الابتدائي", "3 Prim": "الثالث الابتدائي", "4 Prim": "الرابع الابتدائي", "5 Prim": "الخامس الابتدائي", "6 Prim": "السادس الابتدائي", "1 Prep": "الأول الإعدادي", "2 Prep": "الثاني الإعدادي", "3 Prep": "الثالث الإعدادي" };
+const GRADE_LABELS = { "1Sec": "الأول الثانوي — علوم متكاملة", "2Sec": "الثاني الثانوي (بكالوريا) — فيزياء", "3Sec": "الثالث الثانوي — فيزياء" };
+const GRADE_SHORT = { "1Sec": "1ث علوم متكاملة", "2Sec": "2ث بكالوريا", "3Sec": "3ث فيزياء" };
 function currentTermIndex() {
   const m = new Date().getMonth() + 1; // 1-12
   return (m >= 9 || m <= 1) ? 0 : 1;
 }
-const FALLBACK_QUESTIONS = {
-  grammar: [
-    { q: "Choose the correct form: She ___ to school every day.", choices: ["go", "goes", "going", "gone"], correct: 1 },
-    { q: "I ___ my homework yesterday.", choices: ["do", "does", "did", "doing"], correct: 2 },
-    { q: "They ___ watching TV now.", choices: ["is", "am", "are", "be"], correct: 2 },
-    { q: "We have lived here ___ 2015.", choices: ["for", "since", "ago", "during"], correct: 1 },
-    { q: "He is ___ than his brother.", choices: ["tall", "taller", "tallest", "more tall"], correct: 1 },
-    { q: "There ___ some milk in the fridge.", choices: ["is", "are", "were", "be"], correct: 0 },
-    { q: "I'm looking forward to ___ you.", choices: ["see", "saw", "seeing", "sees"], correct: 2 },
-    { q: "If it rains, we ___ stay at home.", choices: ["will", "would", "did", "are"], correct: 0 }
-  ],
-  vocabulary: [
-    { q: "What is the opposite of 'easy'?", choices: ["simple", "difficult", "happy", "fast"], correct: 1 },
-    { q: "A place where you buy medicine:", choices: ["bakery", "library", "pharmacy", "stadium"], correct: 2 },
-    { q: "The past of 'buy' is:", choices: ["buyed", "bought", "buys", "buying"], correct: 1 },
-    { q: "Which word is a fruit?", choices: ["carrot", "potato", "banana", "onion"], correct: 2 },
-    { q: 'The synonym of "happy" is:', choices: ["sad", "glad", "angry", "tired"], correct: 1 },
-    { q: "Doctors work in a ___.", choices: ["hospital", "school", "farm", "factory"], correct: 0 }
-  ]
-};
 
 /* ============================================================
-   الذكاء الاصطناعي — مزوّدين متعددين (Groq / OpenRouter / Gemini)
-   المولد + المساعد بيستخدموا نفس الواجهة aiChat() بغض النظر عن المزوّد
+   بنك الأسئلة الجاهز — علوم متكاملة وفيزياء
+   (بديل مولّد الذكاء الاصطناعي: توليد سريع بدون أي مفتاح،
+   والمستر يعدّل الأسئلة بعد التوليد براحته)
+   ============================================================ */
+const SCIENCE_BANK = {
+  "1Sec": [
+    { q: "الجسم اللي بيتحرك بسرعة ثابتة وعليه قوة احتكاك، القوة المحصلة عليه:", choices: ["صفر", "تساوي قوة الاحتكاك", "تساوي الوزن", "بتزيد مع الزمن"], correct: 0 },
+    { q: "عند انتقال الطاقة في هرم الطاقة البيئي، النسبة اللي بتوصل للمستوى اللي بعده حوالي:", choices: ["10%", "25%", "50%", "90%"], correct: 0 },
+    { q: "المقياس الفيزيائي اللي بيقيس معدل تغير السرعة هو:", choices: ["الإزاحة", "التسارع", "الكتلة", "القوة"], correct: 1 },
+    { q: "القوة اللي بتخلي الأجسام ترجع للأرض هي:", choices: ["الاحتكاك", "الجاذبية الأرضية", "المرونة", "المغناطيسية"], correct: 1 },
+    { q: "الغاز اللي بيتولد من الاحتراق غير الكامل للوقود وسام للإنسان هو:", choices: ["ثاني أكسيد الكربون", "أول أكسيد الكربون", "النيتروجين", "الأكسجين"], correct: 1 },
+    { q: "في السلاسل الغذائية، الكائنات اللي بتصنع غذاءها بنفسها اسمها:", choices: ["مستهلكات أولى", "منتجة", "محللات", "مفترسات"], correct: 1 },
+    { q: "وحدة قياس القوة في النظام الدولي هي:", choices: ["الجول", "النيوتن", "الواط", "الباسكال"], correct: 1 },
+    { q: "لما تضغط على بالونة، الهوا جواها بيتضغط — ده مثال على:", choices: ["ثبات الشكل", "مرونة المواد", "الجاذبية", "الاحتكاك"], correct: 1 },
+    { q: "طبقة الغلاف الجوي اللي بتحمينا من الأشعة فوق البنفسجية:", choices: ["التروبوسفير", "طبقة الأوزون", "الستراتوسفير السفلي", "الإكسوسفير"], correct: 1 },
+    { q: "الكمية الفيزيائية اللي بيتحدد اتجاهها من القاعدة لالإبهام في متجهات الحركة هي:", choices: ["الكتلة", "الإزاحة", "الزمن", "الطاقة"], correct: 1 },
+    { q: "الأول أكسيد الكربون (CO) بيتكون لما:", choices: ["الاحتراق كامل بتوفر أكسجين", "الاحتراق ناقص نقص أكسجين", "المية بتتبخر", "النبات بيتنفس"], correct: 1 },
+    { q: "الحركة اللي بتمر بفترات زمنية متساوية اسمها حركة:", choices: ["متسارعة", "دورية", "خطية", "عشوائية"], correct: 1 }
+  ],
+  "2Sec": [
+    { q: "في حركة المقذوفات الأفقية، التسارع في اتجاه الحركة الرأسي هو:", choices: ["صفر", "عجلة الجاذبية g", "أقل من g", "أكبر من g"], correct: 1 },
+    { q: "كمية التحرك P بتتساوي:", choices: ["m×v", "m×v²", "½mv²", "m/a"], correct: 0 },
+    { q: "في الحركة الدائرية المنتظمة، السرعة ثابتة لكن:", choices: ["الاتجاه بيتغير", "الكتلة بتتغير", "الزمن بيتوقف", "التسارع صفر"], correct: 0 },
+    { q: "الحركة التوافقية البسيطة حركة دورية التسارع فيها:", choices: ["ثابت", "يتناسب مع الإزاحة وعكسها", "صفر دايماً", "متزايد خطياً"], correct: 1 },
+    { q: "زقزة البندول البسيط بتزيد لما:", choices: ["طوله يقل", "طوله يزيد", "كتلته تزيد", "الجاذبية تزيد"], correct: 1 },
+    { q: "في تجربة الشق المزدوج ليونج، ظهور الخطوط المضيئة والمعتمة دليل على:", choices: ["الطبيعة الجسيمية للضوء", "الطبيعة الموجية للضوء", "انعكاس الضوء", "امتصاص الضوء"], correct: 1 },
+    { q: "تأثير دوبلر بيحصل لما:", choices: ["المصدر والمراقب ساكنين", "فيه حركة نسبية بين المصدر والمراقب", "الضوء بينعكس", "الصوت بيمتص"], correct: 1 },
+    { q: "وفق قانون بويل، عند ثبات الحرارة: ضغط الغاز × حجمه =", choices: ["ثابت", "يتناقص", "يتزايد", "صفر"], correct: 0 },
+    { q: "القوة بين شحنتين وفقاً لقانون كولوم بتتناسب عكسياً مع:", choices: ["مجموع الشحنتين", "مربع المسافة بينهما", "الزمن", "سطح التلامس"], correct: 1 },
+    { q: "المكثف بيخزن الطاقة في صورة:", choices: ["مجال مغناطيسي", "مجال كهربي", "طاقة حركية", "طاقة نووية"], correct: 1 },
+    { q: "قانون العقدة الأول لكيرشوف بيتعلق بـ:", choices: ["حفظ الشحنة عند العقدة", "حفظ الطاقة في المسار", "المقاومة النوعية", "القدرة الكهربية"], correct: 0 },
+    { q: "الحث الكهرومغناطيسي اكتشفه العالم:", choices: ["أوم", "فاراداي", "نيوتن", "أمبير"], correct: 1 },
+    { q: "الطاقة الداخلية للغاز المثالي بتتعلق بـ:", choices: ["حجمه فقط", "حرارته", "ضغطه فقط", "لونه"], correct: 1 },
+    { q: "الطبيعة الكمية للضوء اتضحت من ظاهرة:", choices: ["الانعكاس", "الانبعاث الضوئي الكهربي", "الانكسار", "الحيود"], correct: 1 }
+  ],
+  "3Sec": [
+    { q: "الموجات اللي محتاجة وسط مادي لتنتقل هي:", choices: ["الموجات الكهرومغناطيسية", "الموجات الميكانيكية", "ضوء الليزر", "الأشعة السينية"], correct: 1 },
+    { q: "الفرق بين أعلى نقطة وقاع نقطة في الموجة النقالة هو:", choices: ["الطول الموجي", "التردد", "السعة", "الدور"], correct: 2 },
+    { q: "سرعة الموجة = :", choices: ["الطول الموجي × التردد", "السعة × الدور", "التردد ÷ السعة", "الدور × السعة"], correct: 0 },
+    { q: "ظاهرة انحراف الموجة عن مسارها عند مرورها بحافة جسم اسمها:", choices: ["الانعكاس", "الانكسار", "الحيود", "الاستقطاب"], correct: 2 },
+    { q: "الموجات الكهرومغناطيسية بتنطلق في الفراغ بسرعة:", choices: ["332 م/ث", "340 م/ث", "3×10⁸ م/ث", "1500 م/ث"], correct: 2 },
+    { q: "أقوى أشعة تخترق في الطيف الكهرومغناطيسي:", choices: ["موجات الراديو", "الأشعة السينية", "الأشعة جاما", "الأشعة فوق البنفسجية"], correct: 2 },
+    { q: "أثر كومبتون بيأكد:", choices: ["الطبيعة الجسيمية للضوء", "الطبيعة الموجية للمادة", "قانون هوك", "قانون أوم"], correct: 0 },
+    { q: "وفق نموذج بور، الإلكترون بيشع طاقة لما:", choices: ["يبقى في مستوى ثابت", "ينتقل لمستوى أعلى طاقة", "ينتقل لمستوى أقل طاقة", "يعدّي بالمدار"], correct: 2 },
+    { q: "الإشعاع ألفا هو:", choices: ["إلكترونات سريعة", "نوى هيليوم", "موجات كهرومغناطيسية", "نيوترونات"], correct: 1 },
+    { q: "قانون التحلل الإشعاعي بيوضح إن النشاط:", choices: ["ثابت مع الزمن", "يتناقص أسياً مع الزمن", "يتزايد مع الزمن", "صفر دايماً"], correct: 1 },
+    { q: "المواد شبه الموصلة بتوصل الكهرباء:", choices: ["زي الفلزات", "أقل من الفلزات وأكبر من العوازل", "زي العوازل تماماً", "مفيش توصيل نهائياً"], correct: 1 },
+    { q: "الدايود بيسمح بمرور التيار في اتجاه:", choices: ["الاتجاهين", "اتجاه واحد فقط", "لا اتجاه", "اتجاه عشوائي"], correct: 1 }
+  ]
+};
+function bankQuizQuestions(grade, count) {
+  const pool = (SCIENCE_BANK[grade] || SCIENCE_BANK["1Sec"]).slice();
+  for (let i = pool.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    const tmp = pool[i]; pool[i] = pool[j]; pool[j] = tmp;
+  }
+  return pool.slice(0, Math.min(count, pool.length))
+    .map((x) => ({ q: x.q, choices: x.choices.slice(), correct: x.correct }));
+}
+
+/* ============================================================
+   الذكاء الاصطناعي — المساعد الذكي بس (الشات)
+   مولّد الكويزات بالذكاء الاصطناعي اتحذف — بنك الأسئلة هو البديل
    ============================================================ */
 const AI_PROVIDERS = {
   groq: {
@@ -1165,15 +1234,13 @@ function aiErrorHint(provider, status, raw) {
   return "خطأ من الخدمة (" + status + "): " + t;
 }
 
-async function geminiText(systemPrompt, userPrompt, jsonMode) {
+async function geminiText(systemPrompt, userPrompt) {
   const model = (db.settings && db.settings.aiModel) || "gemini-2.5-flash";
   const key = String(db.settings.aiKey).trim();
   const body = {
     systemInstruction: { parts: [{ text: systemPrompt }] },
     contents: [{ role: "user", parts: [{ text: userPrompt }] }],
-    generationConfig: jsonMode
-      ? { responseMimeType: "application/json", temperature: 1.0 }
-      : { temperature: 0.7 }
+    generationConfig: { temperature: 0.7 }
   };
   let res;
   try {
@@ -1198,10 +1265,10 @@ async function geminiText(systemPrompt, userPrompt, jsonMode) {
   return text;
 }
 
-async function aiChat(systemPrompt, userPrompt, jsonMode) {
+async function aiChat(systemPrompt, userPrompt) {
   // الواجهة الموحدة: Groq و OpenRouter (بصيغة OpenAI) + Gemini (صيغته الخاصة)
   const provider = aiProvider();
-  if (provider === "gemini") return geminiText(systemPrompt, userPrompt, jsonMode);
+  if (provider === "gemini") return geminiText(systemPrompt, userPrompt);
   const cfg = AI_PROVIDERS[provider];
   const key = String(db.settings.aiKey || "").trim();
   const model = (db.settings.aiModel && cfg.models[db.settings.aiModel]) ? db.settings.aiModel : Object.keys(cfg.models)[0];
@@ -1209,12 +1276,11 @@ async function aiChat(systemPrompt, userPrompt, jsonMode) {
     { role: "system", content: systemPrompt },
     { role: "user", content: userPrompt }
   ];
-  const body = { model, messages, temperature: jsonMode ? 1.0 : 0.7 };
-  if (jsonMode) body.response_format = { type: "json_object" };
+  const body = { model, messages, temperature: 0.7 };
   const headers = { "Content-Type": "application/json", "Authorization": "Bearer " + key };
   if (provider === "openrouter") {
-    headers["HTTP-Referer"] = location.origin || "https://mr-adel.platform";
-    headers["X-Title"] = "Mr Adel Ezzat English Platform";
+    headers["HTTP-Referer"] = location.origin || "https://mr-ahmed-saad.platform";
+    headers["X-Title"] = "Mr Ahmed Saad Science & Physics Platform";
   }
   let res;
   try {
@@ -1243,7 +1309,7 @@ async function aiTestKey() {
   for (const m of order) {
     try {
       db.settings.aiModel = m;
-      const reply = await aiChat("Reply with exactly: OK", "ping", false);
+      const reply = await aiChat("Reply with exactly: OK", "ping");
       if (reply) {
         return { ok: true, msg: "الاتصال ناجح ✓ — " + m + " شغال", model: m };
       }
@@ -1255,34 +1321,13 @@ async function aiTestKey() {
   return { ok: false, msg: lastErr ? lastErr.message : "فشل الاتصال بكل النماذج" };
 }
 
-async function aiGenerateQuizQuestions(grade, termIdx, unit, count) {
-  const c = CURRICULUM[grade];
-  const book = c ? c.book : "English";
-  const termLabel = c && c.terms[termIdx] ? c.terms[termIdx].label : "";
-  const sys = "You are an expert Egyptian English curriculum item writer for the Egyptian Ministry of Education textbooks (" + book + ", " + termLabel + "). You write multiple-choice questions exactly matching the vocabulary, grammar and topics of the requested unit, appropriate for the students' age. Output ONLY valid JSON.";
-  const user = 'Create ' + count + ' multiple-choice English questions for Egyptian grade "' + (GRADE_LABELS[grade] || grade) + '" from the textbook "' + book + '", ' + termLabel + ', unit "' + unit + '".\n' +
-    'Rules:\n- 4 answer options each, exactly one correct.\n- Mix: vocabulary, grammar, and one dialogue completion if suitable.\n- Simple, clear wording suitable for Egyptian primary/prep students.\n- Distractors must be plausible but definitely wrong.\n' +
-    'Return JSON: {"questions":[{"q":"question text","choices":["a","b","c","d"],"correct":0}]} (correct = index 0-3)';
-  const raw = await aiChat(sys, user, true);
-  const cleaned = raw.replace(/^```json\s*/i, "").replace(/^```\s*/, "").replace(/```\s*$/, "");
-  const parsed = JSON.parse(cleaned);
-  const qs = (parsed.questions || parsed || []).filter((x) => x && x.q && Array.isArray(x.choices) && x.choices.length >= 2 && typeof x.correct === "number");
-  if (!qs.length) throw new Error("صيغة الأسئلة الراجعة من الـ AI مش صحيحة");
-  return qs.slice(0, count).map((x) => ({ q: String(x.q), choices: x.choices.map(String).slice(0, 4), correct: Math.min(3, Math.max(0, x.correct)) }));
-}
-
-function fallbackQuizQuestions(count) {
-  const pool = [...FALLBACK_QUESTIONS.grammar, ...FALLBACK_QUESTIONS.vocabulary];
-  const shuffled = pool.sort(() => Math.random() - 0.5);
-  return shuffled.slice(0, Math.min(count, pool.length));
-}
-
+/* ---------- المساعد الذكي (شخصية العلوم والفيزياء) ---------- */
 let aiMessages = [];
 const AI_SUGGESTIONS = [
-  "إيه الفرق بين since و for؟",
-  "اشرحلي Present Perfect ببساطة",
-  "إيه معنى كلمة environment؟",
-  "صحّحلي: He go to school"
+  "اشرحلي الحركة التوافقية البسيطة ببساطة",
+  "إيه الفرق بين التداخل والحيود؟",
+  "قانون بويل وشارل وإزاي أستخدمه؟",
+  "حللي معايا مسألة على كمية التحرك"
 ];
 function initAI() {
   const status = $("aiStatus");
@@ -1296,7 +1341,7 @@ function initAI() {
   }
   if (!$("aiMessages").dataset.seeded) {
     $("aiMessages").dataset.seeded = "1";
-    aiMessages.push({ role: "bot", text: "أهلاً يا " + (me ? me.name.split(" ")[0] : "صديقي") + "! 👋 أنا مساعدك الذكي في الإنجليزي. اسألني أي حاجة في القواعد أو المفردات أو الترجمة، وهشرحها ليك ببساطة." });
+    aiMessages.push({ role: "bot", text: "أهلاً يا " + (me ? me.name.split(" ")[0] : "صديقي") + "! 👋 أنا مساعدك الذكي في العلوم والفيزياء 🔬 اسألني أي حاجة في منهجك — علوم متكاملة أو فيزياء — أو حتى أسئلة من كتب خارجية، وهشرحها ليك خطوة خطوة بالعربي." });
     renderAIMessages();
     renderAISuggestions();
   }
@@ -1314,23 +1359,29 @@ function renderAIMessages() {
   if (!box) return;
   box.innerHTML = aiMessages.map((m) =>
     '<div class="ai-msg ' + (m.role === "user" ? "user" : "bot") + '">' +
-    (m.role === "bot" ? '<span class="ai-label">🤖 مساعد مستر عادل</span>' : "") +
+    (m.role === "bot" ? '<span class="ai-label">🤖 مساعد مستر أحمد سعد</span>' : "") +
     esc(m.text) + '</div>'
   ).join("");
   box.scrollTop = box.scrollHeight;
 }
 function aiFallbackReply(q) {
   const lower = q.toLowerCase();
-  if (lower.includes("since") && lower.includes("for")) {
-    return "الفرق ببساطة:\n• since + نقطة زمنية محددة (since 2015, since Monday)\n• for + مدة زمنية (for 3 years, for two hours)\nمثال: I have lived here since 2020. / I have lived here for 6 years.";
+  if (lower.includes("توافقية") || lower.includes("بندول")) {
+    return "الحركة التوافقية البسيطة ببساطة:\n• حركة دورية التسارع فيها يتناسب مع الإزاحة وعكس إشارته (a ∝ -y)\n• البندول البسيط: T = 2π√(L/g) — يعني كل ما البندول يطول، الزقزة تزيد\n• البندول الزنبركي: T = 2π√(m/k)\n• مثال من الحياة: تأرجح الأراجيح واهتزاز أوتار العود 🎸";
   }
-  if (lower.includes("present perfect")) {
-    return "Present Perfect ببساطة:\n• التكوين: have/has + التصريف التالت\n• بيحصل في الماضي بس مفعوله لسه موجود دلوقتي\n• كلمات دالة: just, already, yet, ever, never, since, for\nمثال: I have finished my homework. (خلصته وخلاص، مفعوله موجود)";
+  if (lower.includes("تداخل") || lower.includes("حيود")) {
+    return "الفرق ببساطة:\n• التداخل: لما موجتين (أكتر) يلتقوا — لو قمتين في نفس الطور يتعززوا، لو عكس بعض يلغوا بعض\n• الحيود: انحراف الموجة عن مسارها لما تعدي بحافة أو شق ضيق مقارنة بطولها الموجي\n• الاتنين ظواهر موجية بتأكد إن الضوء له طبيعة موجية (تجربة الشق المزدوج ليونج) 🌊";
   }
-  if (lower.includes("معنى") || lower.includes("ايه معنى")) {
-    return "أنا في الوضع المبسط مش بقدر أترجم أي كلمة، بس مستر عادل يقدر يفعّل الذكاء الاصطناعي الكامل بوضع مفتاح Gemini في لوحة التحكم، وساعتها هرد على أي كلمة فوراً! 🚀";
+  if (lower.includes("بويل") || lower.includes("شارل") || lower.includes("غاز")) {
+    return "قوانين الغازات ببساطة:\n• بويل (حرارة ثابتة): P × V = ثابت — تعصر البالونة الضغط يزيد والحجم يقل\n• شارل (ضغط ثابت): V ∝ T — سخّن الغاز يتمدد\n• معادلة الحالة: PV = nRT\n⚠ خد بالك: T لازم تكون بالكلفن (T = t°C + 273) 🌡️";
   }
-  return "سؤال جميل! 👌 أنا دلوقتي في الوضع المبسط، فإجابتي محدودة. اطلب من مستر عادل يضيف مفتاح الذكاء الاصطناعي من لوحة التحكم وهجاوبك على أي حاجة بالتفصيل، وبين الوقت اكتب سؤالك في المنتدى وهيرد عليك المستر أو زمايلك.";
+  if (lower.includes("كمية التحرك") || lower.includes("مومنتوم")) {
+    return "كمية التحرك ببساطة:\n• P = m × v (كتلة × سرعة) ووحدتها kg.m/s\n• دي كمية متجهة — ليها اتجاه زي السرعة\n• قانون الحفظ: في نظام معزول، مجموع كميات التحرك قبل الاصطدام = بعده\n• مثال: اصطدام عربيتين — الكلية قبل = الكلية بعد 🚗";
+  }
+  if (lower.includes("معنى") || lower.includes("ايه معنى") || lower.includes("إيه معنى")) {
+    return "أنا في الوضع المبسط مش بقدر أشرح أي حاجة بالتفصيل، بس مستر أحمد سعد يقدر يفعّل الذكاء الاصطناعي الكامل من لوحة التحكم، وساعتها هرد على أي سؤال فوراً! 🚀";
+  }
+  return "سؤال جميل! 👌 أنا دلوقتي في الوضع المبسط، فإجابتي محدودة. اطلب من مستر أحمد سعد يضيف مفتاح الذكاء الاصطناعي من لوحة التحكم وهجاوبك على أي حاجة بالتفصيل، وبين الوقت اكتب سؤالك في المنتدى وهيرد عليك المستر أو زمايلك.";
 }
 async function sendAIMessage() {
   const input = $("aiInput");
@@ -1349,10 +1400,10 @@ async function sendAIMessage() {
   let reply = "";
   if (aiAvailable()) {
     try {
-      const sys = "أنت مساعد تعليمي ودود لطلاب مصر في المرحلة الابتدائية والإعدادية لمادة اللغة الإنجليزية (منهج وزارة التربية والتعليم المصري الجديد 2026: كتب English Primary للابتدائي وHello! Beyond Words للإعدادي). أجب بالعربية المصرية البسيطة مع أمثلة إنجليزية واضحة، بأسلوب محفز وقصير (3-8 أسطر). لو الطالب كتب جملة إنجليزية فيها خطأ، صححها واشرح الخطأ ببساطة. ممنوع أي محتوى غير تعليمي.";
-      reply = await aiChat(sys, text, false);
+      const sys = "أنت مساعد تعليمي ودود لطلاب مصر في منصة مستر أحمد سعد لمادة العلوم المتكاملة للصف الأول الثانوي والفيزياء للصفين الثاني الثانوي (بكالوريا) والثالث الثانوي. اشرح بالعربية المصرية البسيطة بأسلوب مدرس قريب من الطالب، واعتمد أساساً على منهج وزارة التربية والتعليم المصرية، ولو الطالب سأل عن مواضيع من كتب خارجية أو موسّعة فاشرحها برضه مع ربطها بالمنهج. عامل حل المسائل خطوة بخطوة، واذكر القانون بصيغته ووحدته الصح، وامثّل بمسألة عددية بسيطة لو مناسب، واربط المفاهيم بالحياة اليومية. الإجابة قصيرة ومحفزة (3-8 أسطر). ممنوع أي محتوى غير تعليمي.";
+      reply = await aiChat(sys, text);
     } catch (e) {
-      reply = "⚠ " + (e && e.message ? e.message : "حصلت مشكلة في الاتصال بالذكاء الاصطناعي") + "\nجرب تاني، ولو استمرت المشكلة كلم مستر عادل يضغط «اختبار المفتاح» في الإعدادات.";
+      reply = "⚠ " + (e && e.message ? e.message : "حصلت مشكلة في الاتصال بالذكاء الاصطناعي") + "\nجرب تاني، ولو استمرت المشكلة كلم مستر أحمد سعد يضغط «اختبار المفتاح» في الإعدادات.";
     }
   } else {
     await new Promise((r) => setTimeout(r, 500));
@@ -1475,7 +1526,7 @@ function renderTeacher() {
   const c = $("teacherContainer");
   c.innerHTML =
     saveStatusHTML() +
-    '<div class="notice gold">📌 الأكواد دي هي اللي يتوزع على الطلاب — كل طالب بيكتب كوده في صفحة الدخول.</div>' +
+    '<div class="notice gold">📌 الأكواد دي هي اللي تتوزع على الطلاب — كل طالب بيكتب كوده الرقمي في صفحة الدخول، والحساب بيتقفل على أول جهاز يدخل بيه.</div>' +
     sectionCard("إحصائيات سريعة", teacherStatsHTML()) +
     sectionCard("الطلاب والأكواد", teacherStudentsHTML()) +
     sectionCard("⭐ النقط والمكافآت", teacherPointsHTML()) +
@@ -1483,7 +1534,7 @@ function renderTeacher() {
     sectionCard("الحضور", teacherAttendanceHTML()) +
     sectionCard("الامتحانات والكويزات", teacherQuizzesHTML()) +
     sectionCard("النتائج", teacherResultsHTML()) +
-    sectionCard("الشروحات", teacherLessonsHTML()) +
+    sectionCard("الشروحات والفيديوهات", teacherLessonsHTML()) +
     sectionCard("المنتدى", teacherForumHTML()) +
     sectionCard("الإعدادات", teacherSettingsHTML()) +
     sectionCard("نسخة احتياطية",
@@ -1514,29 +1565,39 @@ function teacherStatsHTML() {
 }
 
 function teacherStudentsHTML() {
+  const gradeOptions = Object.keys(CURRICULUM).map((g) =>
+    '<option value="' + g + '">' + esc(GRADE_LABELS[g]) + '</option>'
+  ).join("");
   return '<div class="grid-2">' +
     '<div class="field"><label>اسم الطالب</label><input id="nsName" placeholder="مثال: أحمد محمد"></div>' +
-    '<div class="field"><label>الفصل</label><input id="nsGrade" placeholder="مثال: 3A"></div>' +
+    '<div class="field"><label>الصف (اختار من القائمة)</label><select id="nsGrade">' + gradeOptions + '</select></div>' +
     '</div>' +
     '<div class="field"><label>رقم واتساب ولي الأمر (اختياري — عشان يوصلك كود الطالب)</label><input id="nsPhone" placeholder="01xxxxxxxxx"></div>' +
-    '<button class="btn primary" id="addStudentBtn">+ إضافة طالب وتوليد كود</button>' +
-    '<div class="notice">اضغط على الكود لنسخه، وزر الواتساب لتبعت الكود لولي الأمر.</div>' +
+    '<button class="btn primary" id="addStudentBtn">+ إضافة طالب وتوليد كود رقمي</button>' +
+    '<div class="notice">الأكواد أرقام بس (6 خانات) عشان تبقى سهلة على الطلاب — اضغط على الكود لنسخه، وزر الواتساب لتبعت الكود لولي الأمر.<br>🔒 الحساب بيتقفل على أول جهاز يدخل بالكود — ولو الطالب غير موبيله، اضغط «فتح القفل» جنبه.</div>' +
     '<div id="studentsList">' + db.students.map((s) => {
       const digits = String(s.phone || "").replace(/\D/g, "");
       const wa = digits ? (digits.startsWith("20") ? digits : digits.startsWith("0") ? "2" + digits : "20" + digits) : "";
-      return '<div class="list-item"><span><b>' + esc(s.name) + '</b> — ' + esc(s.grade) +
-        ' <span class="code-pill" data-copy="' + esc(s.code) + '" style="cursor:pointer;">' + esc(s.code) + '</span></span>' +
+      const lockChip = s.lockedDevice
+        ? '<span class="chip red">🔒 مقفول على جهاز (' + esc(s.lockedDevice || "") + ')</span>'
+        : '<span class="chip gray">لسه مفيش قفل جهاز</span>';
+      return '<div class="list-item"><span><b>' + esc(s.name) + '</b> — ' + esc(GRADE_SHORT[s.grade] || s.grade) +
+        ' <span class="code-pill" data-copy="' + esc(s.code) + '" style="cursor:pointer;">' + esc(s.code) + '</span> ' + lockChip + '</span>' +
         '<span class="actions">' +
-        (wa ? '<a class="btn tiny ghost" target="_blank" href="https://wa.me/' + wa + '?text=' + encodeURIComponent("مرحباً، كود دخول الطالب " + s.name + " لمنصة مستر عادل عزت: " + s.code) + '">📱 واتساب</a>' : '') +
+        (wa ? '<a class="btn tiny ghost" target="_blank" href="https://wa.me/' + wa + '?text=' + encodeURIComponent("مرحباً، كود دخول الطالب " + s.name + " لمنصة مستر أحمد سعد: " + s.code + " (أرقام بس)") + '">📱 واتساب</a>' : '') +
+        (s.lockedDevice ? '<button class="btn tiny ghost" data-unlock-device="' + esc(s.id || s.code) + '">🔓 فتح قفل الجهاز</button>' : '') +
         '<button class="btn tiny danger" data-del-student="' + esc(s.id || s.code) + '">حذف</button></span></div>';
     }).join("") + '</div>';
 }
 
 function teacherAttendanceHTML() {
   const dates = [...new Set(db.attendance.map((a) => a.date))].sort().reverse();
+  const gradeOptions = Object.keys(CURRICULUM).map((g) =>
+    '<option value="' + g + '">' + esc(GRADE_LABELS[g]) + '</option>'
+  ).join("");
   return '<div class="grid-3">' +
     '<div class="field"><label>تاريخ الحصة</label><input type="date" id="attDate" value="' + todayStr() + '"></div>' +
-    '<div class="field"><label>فصل معين (اختياري)</label><input id="attGrade" placeholder="مثال: 3A — فاضي لكل الفصول"></div>' +
+    '<div class="field"><label>الصف (اختياري)</label><select id="attGrade"><option value="">كل الصفوف</option>' + gradeOptions + '</select></div>' +
     '<div class="field"><label>&nbsp;</label><button class="btn primary block" id="openAttBtn">فتح كشف الحضور</button></div>' +
     '</div>' +
     (dates.length ? '<h4 style="margin:10px 0 6px;">كشوف سابقة</h4>' + dates.map((d) => {
@@ -1556,7 +1617,7 @@ function openAttendanceSheet(date, gradeFilter) {
     students.map((s) => {
       const rec = db.attendance.find((a) => a.date === date && a.code === s.code);
       const isPresent = rec ? rec.present : null;
-      return '<div class="list-item"><span><b>' + esc(s.name) + '</b> — ' + esc(s.grade) + ' (' + esc(s.code) + ')</span>' +
+      return '<div class="list-item"><span><b>' + esc(s.name) + '</b> — ' + esc(GRADE_SHORT[s.grade] || s.grade) + ' (' + esc(s.code) + ')</span>' +
         '<span class="actions">' +
         '<button class="btn tiny ' + (isPresent === true ? "primary" : "ghost") + '" data-att="1" data-code="' + esc(s.code) + '">حاضر</button>' +
         '<button class="btn tiny ' + (isPresent === false ? "danger" : "ghost") + '" data-att="0" data-code="' + esc(s.code) + '">غائب</button>' +
@@ -1583,9 +1644,12 @@ function openAttendanceSheet(date, gradeFilter) {
 }
 
 function teacherQuizzesHTML() {
-  return '<div class="field"><label>عنوان الامتحان/الكويز</label><input id="nqTitle" placeholder="مثال: كويز Unit 2"></div>' +
+  const gradeOptions = Object.keys(CURRICULUM).map((g) =>
+    '<option value="' + g + '">' + esc(GRADE_LABELS[g]) + '</option>'
+  ).join("");
+  return '<div class="field"><label>عنوان الامتحان/الكويز</label><input id="nqTitle" placeholder="مثال: كويز الحركة التوافقية البسيطة"></div>' +
     '<div class="field"><label>وصف مختصر (اختياري)</label><input id="nqDesc" placeholder="المدة، المنهج..."></div>' +
-    '<button class="btn primary" id="createQuizBtn">+ إنشاء امتحان جديد</button>' +
+    '<button class="btn primary" id="createQuizBtn">+ إنشاء امتحان يدوي جديد</button>' +
     '<div style="margin-top:10px;">' + (db.quizzes.length ? db.quizzes.slice().reverse().map((q) =>
       '<div class="list-item"><span><b>' + esc(q.title) + '</b> — ' + q.questions.length + ' سؤال — ' + esc(q.date || "") + '</span>' +
       '<span class="actions">' +
@@ -1593,89 +1657,63 @@ function teacherQuizzesHTML() {
       '<button class="btn tiny danger" data-del-quiz="' + esc(q.id) + '">حذف</button></span></div>'
     ).join("") : '<div class="muted">مفيش امتحانات.</div>') + '</div>' +
     '<div id="quizEditor"></div>' +
-    '<h4 class="ai-quiz-heading">✨ إنشاء كويز بالذكاء الاصطناعي (منهج الوزارة 2026)</h4>' +
+    '<h4 class="ai-quiz-heading">📦 توليد كويز من بنك الأسئلة الجاهز</h4>' +
     '<div class="ai-quiz-box">' +
     '<div class="grid-3">' +
-    '<div class="field"><label>الصف</label><select id="aiGrade">' +
-      Object.keys(CURRICULUM).map((g) => '<option value="' + g + '">' + (GRADE_LABELS[g] || g) + ' — ' + CURRICULUM[g].book + '</option>').join("") +
-    '</select></div>' +
-    '<div class="field"><label>الترم</label><select id="aiTerm"></select></div>' +
-    '<div class="field"><label>الوحدة (من كتاب الوزارة)</label><select id="aiUnit"></select></div>' +
+    '<div class="field"><label>الصف</label><select id="bankGrade">' + gradeOptions + '</select></div>' +
+    '<div class="field"><label>الترم</label><select id="bankTerm"></select></div>' +
+    '<div class="field"><label>عدد الأسئلة</label><select id="bankCount"><option>5</option><option selected>8</option><option>10</option></select></div>' +
     '</div>' +
-    '<div class="grid-2">' +
-    '<div class="field"><label>عدد الأسئلة</label><select id="aiCount"><option>5</option><option selected>8</option><option>10</option></select></div>' +
-    '<div class="field"><label>المصدر</label><select id="aiMode"><option value="ai">🤖 ذكاء اصطناعي (يحتاج مفتاح Gemini)</option><option value="fallback">📦 بنك أسئلة جاهز (بدون مفتاح)</option></select></div>' +
-    '</div>' +
-    '<button class="btn gold block" id="aiGenerateBtn">✨ توليد الكويز</button>' +
-    '<div id="aiGenStatus" class="muted" style="margin-top:8px;"></div>' +
+    '<div class="muted" style="margin-bottom:10px;">الأسئلة من بنك جاهز على منهج الوزارة — وبعد التوليد تعدّل أي سؤال وتضيف من عندك براحتك. (مولّد الذكاء الاصطناعي للكويزات اتشال — الذكاء الاصطناعي فاضل للمساعد الذكي في الشات بس)</div>' +
+    '<button class="btn gold block" id="bankGenerateBtn">📦 توليد الكويز</button>' +
+    '<div id="bankGenStatus" class="muted" style="margin-top:8px;"></div>' +
     '</div>';
 }
 
-function fillUnitSelect() {
-  const gradeSel = $("aiGrade");
-  const termSel = $("aiTerm");
-  const unitSel = $("aiUnit");
-  if (!gradeSel || !unitSel) return;
+function fillBankTermSelect() {
+  const gradeSel = $("bankGrade");
+  const termSel = $("bankTerm");
+  if (!gradeSel || !termSel) return;
   const c = CURRICULUM[gradeSel.value];
   if (!c) return;
-  if (termSel) {
-    const cur = currentTermIndex();
-    termSel.innerHTML = c.terms.map((t, i) =>
-      '<option value="' + i + '"' + (i === cur ? " selected" : "") + '>' + esc(t.label) + '</option>'
-    ).join("");
-    if (!termSel.dataset.bound) {
-      termSel.dataset.bound = "1";
-      termSel.addEventListener("change", fillUnitSelect);
-    }
-  }
-  const ti = termSel ? Number(termSel.value || 0) : currentTermIndex();
-  const term = c.terms[ti] || c.terms[0];
-  unitSel.innerHTML = term.units.map((u) => '<option>' + esc(u) + '</option>').join("");
+  const cur = currentTermIndex();
+  termSel.innerHTML = c.terms.map((t, i) =>
+    '<option value="' + i + '"' + (i === cur ? " selected" : "") + '>' + esc(t.label) + '</option>'
+  ).join("");
 }
 
-async function runQuizGeneration() {
-  const btn = $("aiGenerateBtn");
-  const status = $("aiGenStatus");
-  const grade = $("aiGrade").value;
-  const termIdx = $("aiTerm") ? Number($("aiTerm").value || 0) : currentTermIndex();
-  const unit = $("aiUnit").value;
-  const count = Number($("aiCount").value);
-  const mode = $("aiMode").value;
-  const useAI = mode === "ai" && aiAvailable();
-  if (mode === "ai" && !aiAvailable()) {
-    status.innerHTML = '<span class="gen-status-err">محتاج مفتاح Gemini — ضيفه من الإعدادات، أو اختار «بنك أسئلة جاهز».</span>';
+async function runBankGeneration() {
+  const btn = $("bankGenerateBtn");
+  const status = $("bankGenStatus");
+  const grade = $("bankGrade").value;
+  const termIdx = Number($("bankTerm").value || 0);
+  const count = Number($("bankCount").value);
+  const c = CURRICULUM[grade];
+  if (!c) { status.innerHTML = '<span class="gen-status-err">اختار الصف الأول.</span>'; return; }
+  btn.disabled = true;
+  status.innerHTML = '⏳ جاري تجهيز الأسئلة من البنك<span class="spinner-mini"></span>';
+  await new Promise((r) => setTimeout(r, 300));
+  const questions = bankQuizQuestions(grade, count);
+  if (!questions.length) {
+    status.innerHTML = '<span class="gen-status-err">البنك فاضي للصف ده — كلم فريق المنصة.</span>';
+    btn.disabled = false;
     return;
   }
-  btn.disabled = true;
-  status.innerHTML = '⏳ جاري توليد الأسئلة' + (useAI ? ' بالذكاء الاصطناعي' : '') + '<span class="spinner-mini"></span>';
-  try {
-    let questions;
-    if (useAI) {
-      questions = await aiGenerateQuizQuestions(grade, termIdx, unit, count);
-    } else {
-      await new Promise((r) => setTimeout(r, 400));
-      questions = fallbackQuizQuestions(count);
-    }
-    const c = CURRICULUM[grade];
-    const termLabel = c && c.terms[termIdx] ? c.terms[termIdx].label : "";
-    const quiz = {
-      id: uid("qz"),
-      title: (useAI ? "🤖 " : "📦 ") + unit + " — " + (c ? c.book : grade),
-      desc: "كويز " + (useAI ? "مولّد بالذكاء الاصطناعي" : "من البنك الجاهز") + " • " + unit + " • " + (c ? c.book : "") + " • " + termLabel,
-      date: todayStr(),
-      questions,
-      generatedBy: useAI ? "ai" : "bank",
-      gradeTag: grade,
-      termIdx
-    };
-    db.quizzes.push(quiz);
-    await saveDB(["quizzes"]);
-    status.innerHTML = '<span class="gen-status-ok">✓ اتولد كويز «' + esc(quiz.title) + '" بـ ' + questions.length + ' سؤال — موجود دلوقتي عند الطلاب!</span>';
-    renderTeacher();
-  } catch (e) {
-    status.innerHTML = '<span class="gen-status-err">✗ ' + esc(e.message || "خطأ غير متوقع") + '</span>';
-  }
-  btn.disabled = false;
+  const termLabel = c.terms[termIdx] ? c.terms[termIdx].label : "";
+  const quiz = {
+    id: uid("qz"),
+    title: "📦 " + (GRADE_LABELS[grade] || grade) + " — " + termLabel,
+    desc: "كويز من بنك الأسئلة الجاهز • " + c.book + " • " + termLabel + " • عدّل الأسئلة براحتك",
+    date: todayStr(),
+    questions,
+    generatedBy: "bank",
+    gradeTag: grade,
+    termIdx
+  };
+  db.quizzes.push(quiz);
+  await saveDB(["quizzes"]);
+  status.innerHTML = '<span class="gen-status-ok">✓ اتولد «' + esc(quiz.title) + '» بـ ' + questions.length + ' سؤال — عدّله من زر «تعديل الأسئلة».</span>';
+  renderTeacher();
 }
 
 let editQuizId = null;
@@ -1725,20 +1763,23 @@ function openQuizEditor(qid) {
 
 function teacherResultsHTML() {
   if (!db.submissions.length) return '<div class="muted">لسه مفيش نتائج.</div>';
-  return '<div class="table-wrap"><table><tr><th>الطالب</th><th>الفصل</th><th>الامتحان</th><th>الدرجة</th><th>التاريخ</th></tr>' +
+  return '<div class="table-wrap"><table><tr><th>الطالب</th><th>الصف</th><th>الامتحان</th><th>الدرجة</th><th>التاريخ</th></tr>' +
     db.submissions.slice().reverse().map((s) => {
       const q = db.quizzes.find((x) => x.id === s.quizId);
-      return '<tr><td>' + esc(s.name) + '</td><td>' + esc(s.grade) + '</td><td>' + esc(q ? q.title : "—") + '</td>' +
+      return '<tr><td>' + esc(s.name) + '</td><td>' + esc(GRADE_SHORT[s.grade] || s.grade) + '</td><td>' + esc(q ? q.title : "—") + '</td>' +
         '<td><b>' + s.score + '/' + s.max + '</b></td><td>' + esc(dateTime(s.submittedAt)) + '</td></tr>';
     }).join("") + '</table></div>';
 }
 
 function teacherLessonsHTML() {
-  return '<div class="field"><label>عنوان الدرس</label><input id="nlTitle" placeholder="مثال: Unit 3 — Past Perfect"></div>' +
+  return '<div class="field"><label>عنوان الدرس</label><input id="nlTitle" placeholder="مثال: الحركة التوافقية البسيطة"></div>' +
     '<div class="field"><label>وصف مختصر</label><input id="nlDesc" placeholder="اللي هيتشرح في الدرس"></div>' +
-    '<div class="field"><label>روابط فيديوهات يوتيوب (كل رابط في سطر — اختياري)</label><textarea id="nlVideos" rows="2" placeholder="https://youtu.be/..."></textarea></div>' +
+    '<div class="field"><label>🎬 فيديو الشرح — ملف من جهازك (MP4 ويُفضّل أقل من 500 ميجا)</label><input type="file" id="nlVideoFile" accept="video/*"></div>' +
+    '<div id="nlUploadStatus" class="muted"></div>' +
+    '<div class="field"><label>روابط يوتيوب قديمة (اختياري — كل رابط في سطر)</label><textarea id="nlVideos" rows="2" placeholder="https://youtu.be/..."></textarea></div>' +
     '<div class="field"><label>شرح مكتوب</label><textarea id="nlBody" rows="4" placeholder="اكتب الشرح أو الملزم..."></textarea></div>' +
     '<button class="btn primary" id="addLessonBtn">+ إضافة الدرس</button>' +
+    '<div class="notice" style="margin-top:10px;">🔒 الفيديو بيتخزن على المنصة نفسها (مش يوتيوب) وبيتعرض بمشغّل محمي: منع زرار التنزيل + منع كليك يمين + علامة مائية باسم الطالب وكوده + إيقاف تلقائي لو الطالب خرج من النافذة. الحماية المطلقة ضد التصوير مش ممكنة تقنياً في المتصفح، بس دي أقوى وسائل التأمين المتاحة.</div>' +
     '<div style="margin-top:10px;">' + (db.lessons.length ? db.lessons.slice().reverse().map((l) =>
       '<div class="list-item"><span><b>' + esc(l.title) + '</b> — ' + esc(l.date || "") + (l.videos && l.videos.length ? ' — 🎬 ' + l.videos.length + ' فيديو' : '') + '</span>' +
       '<span class="actions"><button class="btn tiny danger" data-del-lesson="' + esc(l.id) + '">حذف</button></span></div>'
@@ -1768,18 +1809,17 @@ function teacherSettingsHTML() {
     '<div class="field"><label>رقم واتساب المنصة (دولي بدون +)</label><input id="setWa" value="' + esc(db.settings.whatsapp || "") + '" placeholder="201012345678"></div>' +
     '</div>' +
     '<div class="field"><label>إعلان للطلاب (بيظهر في الرئيسية)</label><input id="setBanner" value="' + esc(db.settings.banner || "") + '" placeholder="مثال: امتحان الشهر الأسبوع الجاي — ذاكروا كويس!"></div>' +
-    '<h4 class="ai-quiz-heading" style="margin-top:16px;">🤖 الذكاء الاصطناعي</h4>' +
+    '<h4 class="ai-quiz-heading" style="margin-top:16px;">🤖 المساعد الذكي (الشات)</h4>' +
     '<div class="field"><label>المزوّد — جيميناي مش إجباري!</label><select id="setAiProvider">' + providersHTML + '</select></div>' +
     '<div class="grid-2">' +
     '<div class="field"><label>🔑 ' + esc(cfg.keyLabel) + '</label><input id="setAiKey" value="' + esc(db.settings.aiKey || "") + '" placeholder="' + esc(cfg.keyPlaceholder) + '"></div>' +
     '<div class="field"><label>النموذج</label><select id="setAiModel">' + modelsHTML + '</select></div>' +
     '</div>' +
-    '<div class="notice gold">🆓 جيب مفتاحك مجاناً من <a href="' + cfg.getKeyUrl + '" target="_blank" style="color:inherit;font-weight:800;">' + cfg.getKeyUrl.replace("https://", "") + '</a> — ' + esc(cfg.getKeyNote) + '. المفتاح بيتخزن مع إعدادات المنصة ومتشاركش رابط اللوحة مع حد.</div>' +
-    '<h4 class="ai-quiz-heading">🎯 توليد الكويزات من الطلاب</h4>' +
-    '<div class="grid-2">' +
-    '<div class="field" style="display:flex;align-items:center;gap:8px;"><input type="checkbox" id="setAllowStudentQuiz" style="width:auto;"' + (db.settings.allowStudentQuiz !== false ? " checked" : "") + '><label for="setAllowStudentQuiz" style="margin:0;">السماح للطلاب يولّدوا كويزات تدريبية بالذكاء الاصطناعي (بمفتاحك)</label></div>' +
-    '<div class="field"><label>حد الكويزات اليومي للطالب الواحد</label><input type="number" id="setStudentDailyLimit" min="1" max="50" value="' + (Number(db.settings.studentDailyLimit) || 5) + '"></div>' +
-    '</div>' +
+    '<div class="notice gold">🆓 جيب مفتاحك مجاناً من <a href="' + cfg.getKeyUrl + '" target="_blank" style="color:inherit;font-weight:800;">' + cfg.getKeyUrl.replace("https://", "") + '</a> — ' + esc(cfg.getKeyNote) + '. المفتاح بيتخزن مع إعدادات المنصة ومتشاركش رابط اللوحة مع حد. المساعد الذكي بيجاوب على المنهج وبيوسّع من كتب خارجية لو الطالب سأل.</div>' +
+    '<h4 class="ai-quiz-heading">🔐 قواعد Storage للفيديوهات</h4>' +
+    '<div class="notice" style="margin-bottom:10px;">الفيديوهات المرفوعة بتتخزن في Firebase Storage. انشر قواعدها مرة واحدة: Firebase Console → <b>Build → Storage → Rules</b> → انسخ والصق → Publish.' +
+    '<button class="btn tiny primary" id="copyStorageBtn" style="margin:6px 0;display:block;">📋 نسخ قواعد Storage</button>' +
+    '<div id="storageCopied" class="muted"></div></div>' +
     '<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;">' +
     '<button class="btn gold" id="testAiBtn">🔌 اختبار المفتاح والاتصال</button>' +
     '<span id="aiTestStatus"></span>' +
@@ -1821,17 +1861,32 @@ function bindTeacherEvents() {
       }
     });
   }
+  // نسخ قواعد Storage جاهزة (للفيديوهات)
+  const copyStorageBtn = $("copyStorageBtn");
+  if (copyStorageBtn) {
+    copyStorageBtn.addEventListener("click", async () => {
+      try {
+        const res = await fetch("storage.rules");
+        const txt = await res.text();
+        await navigator.clipboard.writeText(txt);
+        $("storageCopied").innerHTML = '<span class="gen-status-ok">✓ اتنسخت! روح Firebase → Storage → Rules → الصق → Publish</span>';
+      } catch (e) {
+        $("storageCopied").innerHTML = '<span class="gen-status-err">انسخها يدوياً من ملف storage.rules في المشروع</span>';
+      }
+    });
+  }
   // طلاب
   $("addStudentBtn").addEventListener("click", async () => {
     const name = $("nsName").value.trim();
-    const grade = $("nsGrade").value.trim() || "عام";
+    const grade = $("nsGrade").value;
     const phone = $("nsPhone").value.trim();
     if (!name) { toast("اكتب اسم الطالب."); return; }
-    const code = genCode(grade);
+    if (!grade || !GRADE_LABELS[grade]) { toast("اختار صف الطالب من القائمة."); return; }
+    const code = genCode();
     db.students.push({ id: uid("st"), code, name, grade, phone });
     await saveDB(["students"]);
     renderTeacher();
-    toast("✓ اتولد كود الطالب: " + code);
+    toast("✓ كود الطالب الرقمي: " + code);
   });
   document.querySelectorAll("[data-copy]").forEach((el) => {
     el.addEventListener("click", () => {
@@ -1848,20 +1903,32 @@ function bindTeacherEvents() {
       renderTeacher();
     });
   });
+  // فتح قفل جهاز طالب (لو غير موبيله أو غير جهازه)
+  document.querySelectorAll("[data-unlock-device]").forEach((b) => {
+    b.addEventListener("click", async () => {
+      if (!confirm("فتح قفل الجهاز للطالب ده؟ أي جهاز يدخل بالكود بعد كده هيتقفل عليه.")) return;
+      const st = db.students.find((s) => (s.id || s.code) === b.dataset.unlockDevice);
+      if (st) {
+        st.lockedDevice = null;
+        await saveDB(["students"]);
+        renderTeacher();
+        toast("✓ اتحرر القفل — الطالب يقدر يدخل من جهاز جديد وهيتقفل عليه.");
+      }
+    });
+  });
 
   // حضور
   $("openAttBtn").addEventListener("click", () => {
-    openAttendanceSheet($("attDate").value || todayStr(), $("attGrade").value.trim());
+    openAttendanceSheet($("attDate").value || todayStr(), $("attGrade").value);
   });
   document.querySelectorAll("[data-view-att]").forEach((b) => {
     b.addEventListener("click", () => openAttendanceSheet(b.dataset.viewAtt, ""));
   });
 
-  // مولد الكويز بالذكاء الاصطناعي
-  if ($("aiGrade")) {
-    fillUnitSelect();
-    $("aiGrade").addEventListener("change", fillUnitSelect);
-    $("aiGenerateBtn").addEventListener("click", runQuizGeneration);
+  // بنك الأسئلة الجاهز
+  if ($("bankGrade")) {
+    fillBankTermSelect();
+    $("bankGenerateBtn").addEventListener("click", runBankGeneration);
   }
 
   // امتحانات
@@ -1895,22 +1962,38 @@ function bindTeacherEvents() {
     });
   });
 
-  // شروحات
+  // شروحات + رفع فيديو كملف
   $("addLessonBtn").addEventListener("click", async () => {
     const title = $("nlTitle").value.trim();
     if (!title) { toast("اكتب عنوان الدرس."); return; }
-    const videos = $("nlVideos").value.split("\n").map((s) => s.trim()).filter(Boolean);
+    const fileInput = $("nlVideoFile");
+    const file = fileInput && fileInput.files ? fileInput.files[0] : null;
+    const ytLinks = $("nlVideos").value.split("\n").map((s) => s.trim()).filter(Boolean);
+    const videos = [];
+    if (file) {
+      const statusEl = $("nlUploadStatus");
+      try {
+        const meta = await uploadLessonVideo(file, statusEl);
+        videos.push(meta);
+        statusEl.innerHTML = '<span class="gen-status-ok">✓ الفيديو اترفع بنجاح واتحفظ على المنصة</span>';
+      } catch (e) {
+        statusEl.innerHTML = '<span class="gen-status-err">✗ ' + esc((e && e.message) || "فشل الرفع") + '</span>';
+        toast("✗ " + ((e && e.message) || "فشل رفع الفيديو"));
+        return;
+      }
+    }
+    for (const link of ytLinks) videos.push(link);
     db.lessons.push({
       id: uid("ls"), title, desc: $("nlDesc").value.trim(),
       date: todayStr(), videos, body: $("nlBody").value.trim()
     });
     await saveDB(["lessons"]);
     renderTeacher();
-    toast("✓ تم إضافة الدرس");
+    toast("✓ تم إضافة الدرس" + (file ? " وفيديو الشرح المحمي 🔒" : ""));
   });
   document.querySelectorAll("[data-del-lesson]").forEach((b) => {
     b.addEventListener("click", async () => {
-      if (!confirm("حذف الدرس؟")) return;
+      if (!confirm("حذف الدرس؟ (الفيديو هيفضل متاح في Storage — تقدر تحذفه يدوياً من Firebase Console)")) return;
       const dl = db.lessons.find((x) => x.id === b.dataset.delLesson);
       db.lessons = db.lessons.filter((l) => l.id !== b.dataset.delLesson);
       if (dl) await cloudDelete("lessons", dl.id);
@@ -1954,7 +2037,7 @@ function bindTeacherEvents() {
       if (res.ok) {
         await saveDB(["settings"]);
         statusEl.innerHTML = '<span class="gen-status-ok">✓ ' + esc(res.msg) + '</span>';
-        toast("🤖 الذكاء الاصطناعي شغال دلوقتي!");
+        toast("🤖 المساعد الذكي شغال دلوقتي!");
       } else {
         statusEl.innerHTML = '<span class="gen-status-err">✗ ' + esc(res.msg) + '</span>';
       }
@@ -1968,8 +2051,6 @@ function bindTeacherEvents() {
     db.settings.aiProvider = $("setAiProvider").value;
     db.settings.aiKey = $("setAiKey").value.trim();
     db.settings.aiModel = $("setAiModel").value;
-    db.settings.allowStudentQuiz = $("setAllowStudentQuiz") ? $("setAllowStudentQuiz").checked : db.settings.allowStudentQuiz;
-    db.settings.studentDailyLimit = Math.max(1, Number($("setStudentDailyLimit") && $("setStudentDailyLimit").value) || 5);
     await saveDB(["settings"]);
     toast("✓ تم حفظ الإعدادات" + (db.settings.aiKey ? " — اضغط «اختبار المفتاح» للتأكد إنه شغال" : ""));
     renderTeacher();
@@ -2009,7 +2090,7 @@ function bindTeacherEvents() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = "منصة-مستر-عادل-" + todayStr() + ".json";
+    a.download = "منصة-مستر-احمد-سعد-" + todayStr() + ".json";
     document.body.appendChild(a); a.click(); a.remove();
     URL.revokeObjectURL(url);
   });
@@ -2036,11 +2117,53 @@ function bindTeacherEvents() {
   });
 }
 
-function genCode(grade) {
-  const letters = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-  let rnd = "";
-  for (let i = 0; i < 4; i++) rnd += letters.charAt(Math.floor(Math.random() * letters.length));
-  return "ADEL-" + (grade || "X").replace(/\s+/g, "") + "-" + rnd;
+/* كود الطالب: أرقام فقط (6 خانات) — سهل للحفظ والكتابة */
+function genCode() {
+  for (let tries = 0; tries < 50; tries++) {
+    const c = String(Math.floor(100000 + Math.random() * 900000));
+    const exists = db.students.some((s) => String(s.code) === c);
+    if (!exists) return c;
+  }
+  return String(Date.now()).slice(-8);
+}
+
+/* ============================================================
+   رفع الفيديوهات — ملفات على Firebase Storage (مش يوتيوب)
+   ============================================================ */
+function videoErrorHint(err) {
+  const code = String((err && err.code) || "");
+  if (/unauthorized|permission|storage\/unauthorized/i.test(code)) return "قواعد Storage مش منشورة — انسخها من زر «نسخ قواعد Storage» في الإعدادات وانشرها في Firebase Console → Storage → Rules.";
+  if (/canceled/i.test(code)) return "الرفع اتلغي.";
+  if (/quota|bucket/i.test(code)) return "مشكلة مساحة تخزين — راجع Firebase Console → Storage.";
+  if (/retry/i.test(code)) return "الإنترنت قطع أثناء الرفع — جرب تاني.";
+  return "فشل رفع الفيديو: " + ((err && err.message) || "خطأ غير معروف");
+}
+async function uploadLessonVideo(file, statusEl) {
+  if (!storage) throw new Error("خدمة الملفات مش متاحة — اتأكد من إن Storage مفعّل في مشروع Firebase.");
+  if (file.size > 500 * 1024 * 1024) throw new Error("الفيديو أكبر من 500 ميجا — قلّل جودته أو قسمه لأجزاء.");
+  const safeName = "videos/" + Date.now() + "_" + String(file.name).replace(/[^\w.\-\u0600-\u06FF ]+/g, "_");
+  const pathRef = ref(storage, safeName);
+  const task = uploadBytesResumable(pathRef, file, { contentType: file.type || "video/mp4" });
+  return new Promise((resolve, reject) => {
+    task.on("state_changed",
+      (snap) => {
+        if (statusEl) {
+          const pct = Math.round((snap.bytesTransferred / Math.max(1, snap.totalBytes)) * 100);
+          statusEl.innerHTML = '⏳ جاري رفع الفيديو... ' + pct + '% <span class="spinner-mini"></span>';
+        }
+      },
+      (err) => reject(new Error(videoErrorHint(err))),
+      async () => {
+        try {
+          const url = await getDownloadURL(task.snapshot.ref);
+          resolve({
+            kind: "file", name: file.name, size: file.size,
+            type: file.type || "video/mp4", path: safeName, url, uploadedAt: Date.now()
+          });
+        } catch (e) { reject(new Error(videoErrorHint(e))); }
+      }
+    );
+  });
 }
 
 /* ============================================================
@@ -2077,6 +2200,38 @@ function bindGlobalEvents() {
   $("teacherExitBtn").addEventListener("click", teacherExit);
   $("teacherLoginBtn").addEventListener("click", teacherLogin);
   $("teacherPass").addEventListener("keydown", (e) => { if (e.key === "Enter") teacherLogin(); });
+
+  // ===== حماية الفيديوهات والمحتوى =====
+  // منع كليك يمين على الفيديو
+  document.addEventListener("contextmenu", (e) => {
+    const modal = $("videoModal");
+    if (e.target && e.target.tagName === "VIDEO") { e.preventDefault(); return; }
+    if (modal && !modal.classList.contains("hidden") && modal.contains(e.target)) e.preventDefault();
+  });
+  // إيقاف الفيديو لو الطالب غيّر التاب أو صفحة تانية (تصدير لقطة شاشة)
+  document.addEventListener("visibilitychange", () => {
+    const v = $("protectedVideo");
+    if (!v) return;
+    if (document.hidden) {
+      if (!v.paused) v.pause();
+      const g = $("videoGuard"); if (g) g.classList.remove("hidden");
+    }
+  });
+  window.addEventListener("blur", () => {
+    const v = $("protectedVideo");
+    if (v && !v.paused) v.pause();
+    const g = $("videoGuard"); if (g) g.classList.remove("hidden");
+  });
+  window.addEventListener("focus", () => {
+    const g = $("videoGuard"); if (g) g.classList.add("hidden");
+  });
+  // تنبيه عند محاولة PrintScreen (إجراء تخفيفي — مش حماية كاملة)
+  document.addEventListener("keyup", (e) => {
+    if (e.key === "PrintScreen" || e.code === "PrintScreen") {
+      toast("📸 ممنوع أخد لقطات شاشة من المنصة — الفيديوهات مسجلة باسمك.");
+      try { navigator.clipboard.writeText(" ").catch(() => {}); } catch (e2) {}
+    }
+  });
 }
 
 async function boot() {

@@ -1,0 +1,44 @@
+rules_version = '2';
+
+// ============================================================
+// قواعد أمان Firebase Storage — منصة مستر أحمد سعد
+//
+// الفيديوهات بتترفع كملفات مباشرة (مش يوتيوب) في المسار:
+//   videos/{timestamp}_{filename}
+//
+// ⚠ خطوة المستر الوحيدة (مرة واحدة):
+//   Firebase Console → Build → Storage → تبويب Rules
+//   → انسخ الملف ده والصقه → Publish
+//   (أو من الكمبيوتر: firebase deploy --only storage)
+//
+// القراءة مفتوحة عشان الطلاب يشوفوا الفيديوهات من المشغّل
+// المحمي جوه المنصة (منع التنزيل والعلامة المائية طبقة تطبيق
+// فوق كده)، والكتابة محدودة بملفات الفيديو فقط.
+// ============================================================
+
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    // فيديوهات المنصة: قراءة للعرض، كتابة لرفع دروس جديدة
+    match /videos/{fileName} {
+      allow read: if true;
+      allow write: if true; // الرفع من لوحة المستر — راجع ملاحظة التقوية تحت
+    }
+
+    // منع أي شيء آخر نهائياً (deny-by-default صريح)
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+
+    // ============================================================
+    // نسخة مقوّاة (اختياري — للترقية المستقبلية):
+    // فعّل Authentication واربط كل جهاز بحساب مجهول، وبعدين:
+    //   match /videos/{fileName} {
+    //     allow read: if request.auth != null;
+    //     allow write: if request.auth != null
+    //       && request.resource.size < 500 * 1024 * 1024
+    //       && request.resource.contentType.matches('video/.*');
+    //   }
+    // ============================================================
+  }
+}

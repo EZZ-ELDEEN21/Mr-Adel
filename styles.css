@@ -435,3 +435,36 @@ tr.rank-3 td{background:linear-gradient(90deg,#f9f0e6,#fbfaf6);}
   .podium{gap:8px;}
   .podium .podium-slot{max-width:110px;}
 }
+
+/* ============================================================
+   المشغّل المحمي للفيديوهات — منصة مستر أحمد سعد
+   منع التنزيل + علامة مائية باسم الطالب + درع إيقاف عند فقدان التركيز
+   ============================================================ */
+.video-wrap{position:relative;background:#000;border-radius:12px;overflow:hidden;}
+.video-wrap video{
+  display:block;width:100%;max-height:62vh;background:#000;border-radius:12px;
+}
+.video-watermark{
+  position:absolute;inset:0;pointer-events:none;z-index:5;
+  display:grid;grid-template-columns:1fr 1fr;align-content:space-around;
+  justify-items:center;opacity:.5;mix-blend-mode:screen;
+}
+.video-watermark span{
+  color:rgba(255,255,255,.85);font-size:12.5px;font-weight:700;
+  transform:rotate(-18deg);white-space:nowrap;letter-spacing:.5px;
+  text-shadow:0 1px 3px rgba(0,0,0,.8);padding:2px 10px;
+}
+.video-guard{
+  position:absolute;inset:0;z-index:10;cursor:pointer;
+  background:rgba(10,34,51,.92);display:flex;align-items:center;justify-content:center;
+}
+.video-guard>div{text-align:center;color:var(--gold-soft);font-weight:800;font-size:16px;padding:20px;}
+.video-guard>div span{display:block;margin-top:8px;font-size:12.5px;font-weight:600;opacity:.85;}
+.video-wrap video::selection{background:transparent;}
+.user-select-none,.video-wrap{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;}
+
+/* ===== قفل الجهاز في لوحة المستر ===== */
+.device-chip-note{font-size:11.5px;color:var(--muted);margin-top:4px;}
+@media (max-width:860px){
+  .video-watermark span{font-size:10.5px;}
+}
