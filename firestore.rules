@@ -1,0 +1,85 @@
+rules_version = '2';
+
+// ============================================================
+// قواعد أمان Firestore — منصة مستر أحمد سعد
+// العلوم المتكاملة 1ث + الفيزياء 2 بكالوريا + الفيزياء 3ث
+// (المشروع: clinic-nour)
+//
+// البنية: كل كيان في مجموعة مستقلة (adel_*) مع كتابة ذرّية
+// لكل عنصر — عشان المزامنة بين أجهزة المستر والطلاب تشتغل صح.
+//
+// المجموعات:
+//   adel_students, adel_attendance, adel_quizzes, adel_submissions,
+//   adel_lessons, adel_forum, adel_points, adel_rewards,
+//   adel_redemptions, adel_settings
+//
+// حقول حماية الحساب في adel_students:
+//   lockedDevice — بصمة الجهاز المقفول عليها الحساب (قفل الجهاز الواحد)
+//
+// المسارات القديمة (academy/adelEzzat) محفوظة للقراءة والترحيل،
+// والتطبيق القديم clinic-old محمي زي ما هو.
+//
+// ⚠ خطوة المستر الوحيدة: انشر القواعد دي من Firebase Console
+//   (Firestore → Rules → انسخ الملف ده → Publish)
+//   أو من الكمبيوتر: firebase deploy --only firestore:rules
+//   بدون النشر هيظهر toast أصفر وبيانات المنصة هتفضل محلية.
+//
+// ملاحظة أمان: "allow if true" معناها أي حد يعرف رابط الموقع
+// يقدر يقرأ/يعدل بيانات المنصة — مقبول لفصل صغير مع كلمة سر
+// اللوحة + قفل الأجهزة + حد محاولات الدخول، ونسخة مقوّاة
+// بالـ Authentication مشروحة في التعليقات تحت.
+// ============================================================
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ----------------------------------------------------------
+    // 1) منصة مستر أحمد سعد — المجموعات (كل الكيانات)
+    //    الفيديوهات نفسها في Firebase Storage (شوف storage.rules)
+    // ----------------------------------------------------------
+    match /adel_students/{docId}   { allow read, write: if true; }
+    match /adel_attendance/{docId} { allow read, write: if true; }
+    match /adel_quizzes/{docId}    { allow read, write: if true; }
+    match /adel_submissions/{docId}{ allow read, write: if true; }
+    match /adel_lessons/{docId}    { allow read, write: if true; }
+    match /adel_forum/{docId}      { allow read, write: if true; }
+    match /adel_points/{docId}     { allow read, write: if true; }
+    match /adel_rewards/{docId}    { allow read, write: if true; }
+    match /adel_redemptions/{docId}{ allow read, write: if true; }
+    match /adel_settings/{docId}   { allow read, write: if true; }
+
+    // ----------------------------------------------------------
+    // 2) المستند القديم: للقراءة والكتابة مرة واحدة أثناء
+    //    الترحيل (التطبيق بيعمل أرشفة ثم يعلّمه migrated)
+    // ----------------------------------------------------------
+    match /academy/adelEzzat {
+      allow read, write: if true;
+    }
+    match /academy/adelEzzat_backup_v1 {
+      allow read, write: if true; // أرشيف بيانات ما قبل الترحيل
+    }
+
+    // ----------------------------------------------------------
+    // 3) تطبيق العيادة القديم (clinic-old/) على نفس المشروع
+    // ----------------------------------------------------------
+    match /clinic/main {
+      allow read, write: if true;
+    }
+
+    // ----------------------------------------------------------
+    // 4) منع كل شيء آخر نهائياً (deny-by-default صريح)
+    // ----------------------------------------------------------
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // ============================================================
+    // نسخة مقوّاة (اختياري — للترقية المستقبلية):
+    // 1) فعّل Anonymous Authentication في Firebase Console:
+    //    Authentication → Sign-in method → Anonymous → Enable
+    // 2) في app.js نفّذ signInAnonymously عند التحميل.
+    // 3) استبدل كل قواعد "if true" أعلاه بـ:
+    //    allow read, write: if request.auth != null;
+    // ============================================================
+  }
+}
